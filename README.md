@@ -1,38 +1,79 @@
-# Welcome to flow-opt
+# flow-opt
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![GitHub Workflow Status](https://github.com/thomasisensee/flow-opt/actions/workflows/ci.yml/badge.svg)](https://github.com/thomasisensee/flow-opt/actions/workflows/ci.yml)
-[![Documentation Status](https://readthedocs.org/projects/flow-opt/badge/)](https://flow-opt.readthedocs.io/)
-[![codecov](https://codecov.io/github/thomasisensee/flow-opt/graph/badge.svg?token=DRJB38CIZI)](https://codecov.io/github/thomasisensee/flow-opt)
-[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/thomasisensee/flow-opt/main.svg)](https://results.pre-commit.ci/latest/github/thomasisensee/flow-opt/main)
-![Python](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13%20|%203.14-blue)
+`flow-opt` is a small orchestration layer for simulation-based optimization
+workflows for Python 3.11 and newer. It is intended to make workflows easier to configure, run locally,
+measure, and later connect to HPC execution backends.
 
+The first version is deliberately backend-neutral. It does not depend on Slurm,
+Pyro5, dtOO, OpenFOAM, or a cluster environment. Those systems can be connected
+later through evaluator or execution-backend adapters.
 
 ## Installation
 
-The Python package `flow_opt` can be installed from PyPI:
+For development, use an editable install:
 
-```
-python -m pip install flow_opt
-```
-
-## Development installation
-
-If you want to contribute to the development of `flow_opt`, we recommend
-the following editable installation from this repository:
-
-```
-git clone git@github.com:thomasisensee/flow-opt.git
-cd flow-opt
+```bash
 python -m pip install --editable .[tests]
 ```
 
-Having done so, the test suite can be run using `pytest`:
+or with uv:
 
+```bash
+uv sync --extra tests
 ```
+
+## Minimal local run
+
+The package includes a deterministic toy evaluator that can be run on any
+machine:
+
+```bash
+flow-opt check examples/quadratic.toml
+flow-opt run examples/quadratic.toml
+flow-opt inspect examples/runs/quadratic
+```
+
+A workflow configuration names an evaluator, a run directory, optional resource
+hints, and candidate parameters:
+
+```toml
+[run]
+directory = "runs/quadratic"
+scratch_directory = "runs/quadratic/scratch"
+
+[evaluator]
+name = "quadratic"
+
+[resources]
+cpus = 1
+
+[[candidate]]
+id = "baseline"
+[candidate.parameters]
+alpha = 1.0
+beta = 2.0
+```
+
+`flow-opt run` writes a copied config, `results.jsonl`, and `summary.json` to
+the run directory.
+
+## Design direction
+
+Workflow-specific code should implement the `CaseEvaluator` interface. The core
+package handles candidate records, execution context, result records, run
+directories, and local execution. HPC launchers and distributed execution are
+future adapters, not assumptions in the core API.
+
+## Development
+
+Run tests with:
+
+```bash
 python -m pytest
 ```
 
-## Acknowledgments
+Run linting with:
 
-This repository was set up using the [SSC Cookiecutter for Python Packages](https://github.com/ssciwr/cookiecutter-python-package).
+```bash
+python -m ruff check .
+```

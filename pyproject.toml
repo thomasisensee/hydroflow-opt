@@ -7,13 +7,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flow_opt"
-description = "Add short description here"
+description = "Reusable orchestration for simulation-based optimization workflows"
 readme = "README.md"
 maintainers = [
     { name = "Thomas Isensee", email = "thomas.isensee@iwr.uni-heidelberg.de" },
 ]
 version = "0.0.1"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license-files = ["LICEN[CS]E*"]
 license = "MIT"
 classifiers = [
@@ -45,6 +45,10 @@ tests = [
     "pytest",
     "pytest-cov",
 ]
+
+
+[project.scripts]
+flow-opt = "flow_opt.cli:main"
 
 [project.urls]
 repository = "https://github.com/thomasisensee/flow-opt"

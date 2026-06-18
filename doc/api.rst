@@ -1,9 +1,32 @@
 User API
 ========
 
-.. toctree::
+Core models
+-----------
 
-This is an example function:
+.. automodule:: flow_opt.models
+    :members:
 
-.. automodule:: flow_opt
+Configuration
+-------------
+
+.. automodule:: flow_opt.config
+    :members:
+
+Evaluators
+----------
+
+.. automodule:: flow_opt.evaluators
+    :members:
+
+Runner
+------
+
+.. automodule:: flow_opt.runner
+    :members:
+
+CLI
+---
+
+.. automodule:: flow_opt.cli
     :members:
