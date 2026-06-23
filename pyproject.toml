@@ -13,7 +13,7 @@ maintainers = [
     { name = "Thomas Isensee", email = "thomas.isensee@iwr.uni-heidelberg.de" },
 ]
 version = "0.0.1"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license-files = ["LICEN[CS]E*"]
 license = "MIT"
 classifiers = [
@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy",
+    "pygmo>=2.19.8",
 ]
 
 [project.optional-dependencies]

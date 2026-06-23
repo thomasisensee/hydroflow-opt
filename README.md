@@ -1,31 +1,28 @@
 # flow-opt
 
-`flow-opt` is a small orchestration layer for simulation-based optimization
-workflows for Python 3.11 and newer. It is intended to make workflows easier to configure, run locally,
-measure, and later connect to HPC execution backends.
+`flow-opt` is a Linux/Python 3.11–3.13 orchestration package for
+simulation-based optimization. It uses pygmo's island model, runs individual
+case evaluations in isolated subprocesses, and does not depend on Slurm,
+OpenFOAM, dtOO, or Pyro5.
 
-The first version is deliberately backend-neutral. It does not depend on Slurm,
-Pyro5, dtOO, OpenFOAM, or a cluster environment. Those systems can be connected
-later through evaluator or execution-backend adapters.
+Cases are supplied by installed plugins. The package includes a deterministic
+`quadratic` case for laptop development and tests. A real case, such as
+`flow-opt-hydrofoil`, depends on `flow-opt` rather than the reverse.
 
 ## Installation
 
-For development, use an editable install:
-
-```bash
-python -m pip install --editable .[tests]
-```
-
-or with uv:
+Install with uv or pip on a supported Linux system:
 
 ```bash
 uv sync --extra tests
+# or
+python -m pip install --editable '.[tests]'
 ```
 
-## Minimal local run
+`pygmo` is a required dependency. A simulation case may have additional
+runtime prerequisites, but those must not be imported by `flow-opt` itself.
 
-The package includes a deterministic toy evaluator that can be run on any
-machine:
+## Run explicit candidates
 
 ```bash
 flow-opt check examples/quadratic.toml
@@ -33,47 +30,73 @@ flow-opt run examples/quadratic.toml
 flow-opt inspect examples/runs/quadratic
 ```
 
-A workflow configuration names an evaluator, a run directory, optional resource
-hints, and candidate parameters:
-
 ```toml
 [run]
 directory = "runs/quadratic"
 scratch_directory = "runs/quadratic/scratch"
 
-[evaluator]
+[case]
 name = "quadratic"
 
 [resources]
-cpus = 1
+available_cpus = 1
+concurrent_evaluations = 1
+mpi_ranks = 1
+threads_per_rank = 1
 
 [[candidate]]
 id = "baseline"
 [candidate.parameters]
-alpha = 1.0
-beta = 2.0
+x = 1.0
+y = 2.0
 ```
 
-`flow-opt run` writes a copied config, `results.jsonl`, and `summary.json` to
-the run directory.
+Each candidate gets its own request, result, stdout, stderr, and scratch
+directory under the run directory. The resource invariant is:
 
-## Design direction
+```text
+concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus
+```
 
-Workflow-specific code should implement the `CaseEvaluator` interface. The core
-package handles candidate records, execution context, result records, run
-directories, and local execution. HPC launchers and distributed execution are
-future adapters, not assumptions in the core API.
+`flow-opt` refuses a configuration that violates it. A case may use the
+allocated MPI rank count internally, but it must never choose global
+concurrency or use an oversubscription flag.
+
+## Optimize with islands
+
+Add an `[optimization]` table and use `optimize`:
+
+```toml
+[optimization]
+islands = 4
+population_size = 8
+generations = 10
+differential_weight = 0.8
+crossover_rate = 0.9
+topology = "fully_connected"
+```
+
+```bash
+flow-opt optimize path/to/config.toml
+```
+
+The initial implementation supports pygmo differential evolution and a
+fully-connected archipelago. Islands use pygmo multiprocessing and therefore
+cannot exceed `resources.concurrent_evaluations`; this preserves the CPU
+budget even when each evaluation launches MPI ranks. The case plugin supplies
+parameter names, bounds, and decoding; optimization settings are per run.
+
+## Write a case plugin
+
+Publish an entry point in the `flow_opt.cases` group. Its plugin object exposes
+a `parameter_space(options)` method and a `worker_command(request, result)`
+method. The command receives JSON paths and must write one structured result.
+The worker protocol lets a future Slurm backend launch exactly the same case
+worker with scheduler-owned resources.
 
 ## Development
 
-Run tests with:
-
 ```bash
 python -m pytest
-```
-
-Run linting with:
-
-```bash
 python -m ruff check .
 ```

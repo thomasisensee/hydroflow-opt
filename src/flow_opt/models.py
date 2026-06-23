@@ -1,9 +1,8 @@
-"""Core data structures for workflow evaluation."""
+"""Public contracts for cases, resources, and evaluation results."""
 
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-from typing import Any, Protocol, Self
+from typing import Any, Self
 
 
 class EvaluationStatus(str, Enum):
@@ -41,29 +40,86 @@ class Candidate:
 
 
 @dataclass(frozen=True)
-class ExecutionContext:
-    """Runtime paths and resource hints passed to evaluators.
+class ParameterSpace:
+    """Named, bounded numerical input space exposed by an optimization case."""
 
-    Parameters
-    ----------
-    run_dir
-        Directory for durable run artifacts such as copied configuration,
-        result records, summaries, and logs.
-    scratch_dir
-        Directory for temporary evaluator output. Evaluators may use this for
-        generated meshes, solver cases, or intermediate files.
-    cpus
-        CPU count requested for one candidate evaluation. This is a resource
-        hint for evaluators and local backends, not a scheduler contract.
-    metadata
-        Additional backend- or site-specific context values. The core package
-        stores the mapping but does not interpret it.
-    """
+    names: tuple[str, ...]
+    lower_bounds: tuple[float, ...]
+    upper_bounds: tuple[float, ...]
 
-    run_dir: Path
-    scratch_dir: Path
-    cpus: int = 1
-    metadata: dict[str, Any] = field(default_factory=dict)
+    def __post_init__(self) -> None:
+        if not self.names:
+            raise ValueError(
+                "a parameter space must contain at least one value"
+            )
+        if not (
+            len(self.names) == len(self.lower_bounds) == len(self.upper_bounds)
+        ):
+            raise ValueError(
+                "parameter names and bounds must have equal length"
+            )
+        if len(set(self.names)) != len(self.names):
+            raise ValueError("parameter names must be unique")
+        if any(
+            low >= high
+            for low, high in zip(
+                self.lower_bounds, self.upper_bounds, strict=True
+            )
+        ):
+            raise ValueError(
+                "each lower bound must be smaller than its upper bound"
+            )
+
+    def decode(
+        self, values: list[float] | tuple[float, ...]
+    ) -> dict[str, float]:
+        """Map an optimizer vector to the case's named parameter mapping."""
+
+        if len(values) != len(self.names):
+            raise ValueError(
+                "candidate dimension does not match parameter space"
+            )
+        return {
+            name: float(value)
+            for name, value in zip(self.names, values, strict=True)
+        }
+
+
+@dataclass(frozen=True)
+class ResourceRequest:
+    """The complete CPU shape of one evaluation and its local capacity."""
+
+    available_cpus: int = 1
+    concurrent_evaluations: int = 1
+    mpi_ranks: int = 1
+    threads_per_rank: int = 1
+
+    def __post_init__(self) -> None:
+        values = (
+            self.available_cpus,
+            self.concurrent_evaluations,
+            self.mpi_ranks,
+            self.threads_per_rank,
+        )
+        if any(value < 1 for value in values):
+            raise ValueError("resource counts must be at least one")
+        if self.total_requested_cpus > self.available_cpus:
+            raise ValueError(
+                "concurrent_evaluations * mpi_ranks * threads_per_rank "
+                "must not exceed available_cpus"
+            )
+
+    @property
+    def cpus_per_evaluation(self) -> int:
+        """CPU count occupied by one candidate evaluation."""
+
+        return self.mpi_ranks * self.threads_per_rank
+
+    @property
+    def total_requested_cpus(self) -> int:
+        """Maximum simultaneous CPU demand."""
+
+        return self.concurrent_evaluations * self.cpus_per_evaluation
 
 
 @dataclass(frozen=True)
@@ -166,33 +222,3 @@ class EvaluationResult:
             metadata=metadata or {},
             error=error,
         )
-
-
-class CaseEvaluator(Protocol):
-    """Interface implemented by workflow-specific evaluators.
-
-    Evaluators contain the case-specific work: creating inputs, running a
-    simulation or surrogate, computing an objective, and returning structured
-    diagnostics. The core runner only requires this protocol and therefore does
-    not depend on dtOO, OpenFOAM, Slurm, or a specific optimizer.
-    """
-
-    def evaluate(
-        self,
-        candidate: Candidate,
-        context: ExecutionContext,
-    ) -> EvaluationResult:
-        """Evaluate one candidate.
-
-        Parameters
-        ----------
-        candidate
-            Candidate parameter set to evaluate.
-        context
-            Runtime paths and resource hints for this evaluation.
-
-        Returns
-        -------
-        EvaluationResult
-            Structured result record for the candidate.
-        """
