@@ -13,10 +13,10 @@ Configuration
 .. automodule:: flow_opt.config
     :members:
 
-Evaluators
-----------
+Cases
+-----
 
-.. automodule:: flow_opt.evaluators
+.. automodule:: flow_opt.cases
     :members:
 
 Runner

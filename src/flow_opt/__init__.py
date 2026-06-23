@@ -2,15 +2,16 @@
 
 from importlib import metadata
 
-from flow_opt.config import FlowOptConfig, load_config
-from flow_opt.evaluators import evaluator_from_name
+from flow_opt.cases import CasePlugin, case_from_name
+from flow_opt.config import FlowOptConfig, OptimizationConfig, load_config
 from flow_opt.models import (
     Candidate,
     EvaluationResult,
     EvaluationStatus,
-    ExecutionContext,
+    ParameterSpace,
+    ResourceRequest,
 )
-from flow_opt.runner import RunSummary, run_local
+from flow_opt.runner import RunSummary, run_local, run_optimization
 
 try:
     __version__ = metadata.version(__package__)
@@ -20,12 +21,16 @@ del metadata
 
 __all__ = [
     "Candidate",
+    "CasePlugin",
     "EvaluationResult",
     "EvaluationStatus",
-    "ExecutionContext",
     "FlowOptConfig",
+    "OptimizationConfig",
+    "ParameterSpace",
+    "ResourceRequest",
     "RunSummary",
-    "evaluator_from_name",
+    "case_from_name",
     "load_config",
     "run_local",
+    "run_optimization",
 ]
