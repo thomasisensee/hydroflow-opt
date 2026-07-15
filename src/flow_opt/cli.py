@@ -5,7 +5,12 @@ from pathlib import Path
 
 from flow_opt.cases import case_from_name
 from flow_opt.config import load_config
-from flow_opt.runner import inspect_run, run_local, run_optimization
+from flow_opt.runner import (
+    inspect_run,
+    resume_optimization,
+    run_local,
+    run_optimization,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument("config", type=Path)
     inspect_parser = subparsers.add_parser("inspect")
     inspect_parser.add_argument("run_dir", type=Path)
+    resume_parser = subparsers.add_parser("resume")
+    resume_parser.add_argument("run_dir", type=Path)
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -27,6 +34,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{summary.failed} failed"
         )
         return 0
+
+    if args.command == "resume":
+        summary = resume_optimization(args.run_dir)
+        print(
+            f"run complete: {summary.succeeded}/{summary.total} succeeded, "
+            f"results={summary.results_path}"
+        )
+        return 0 if summary.failed == 0 else 1
 
     config = load_config(args.config)
     case_from_name(config.case_name)

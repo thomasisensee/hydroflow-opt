@@ -1,9 +1,8 @@
 # flow-opt
 
 `flow-opt` is a Linux/Python 3.11–3.13 orchestration package for
-simulation-based optimization. It uses pygmo's island model, runs individual
-case evaluations in isolated subprocesses, and does not depend on Slurm,
-OpenFOAM, dtOO, or Pyro5.
+simulation-based optimization. It uses pygmo's island model and runs individual
+case evaluations in isolated subprocesses.
 
 Cases are supplied by installed plugins. The package includes a deterministic
 `quadratic` case for laptop development and tests. A real case, such as
@@ -74,11 +73,24 @@ generations = 10
 differential_weight = 0.8
 crossover_rate = 0.9
 topology = "fully_connected"
+seed = 12345 # optional; generated and recorded when omitted
 ```
 
 ```bash
 flow-opt optimize path/to/config.toml
 ```
+
+Optimization runs write an atomic JSON checkpoint after initialization and
+after every generation. Resume an interrupted run using its stored effective
+configuration:
+
+```bash
+flow-opt resume path/to/run-directory
+```
+
+Software and platform versions are recorded in `manifest.json`. Compatible
+version changes produce warnings when resuming rather than blocking the run;
+flow-opt treats deterministic replay as best-effort.
 
 The initial implementation supports pygmo differential evolution and a
 fully-connected archipelago. Islands use pygmo multiprocessing and therefore
@@ -93,10 +105,3 @@ a `parameter_space(options)` method and a `worker_command(request, result)`
 method. The command receives JSON paths and must write one structured result.
 The worker protocol lets a future Slurm backend launch exactly the same case
 worker with scheduler-owned resources.
-
-## Development
-
-```bash
-python -m pytest
-python -m ruff check .
-```
