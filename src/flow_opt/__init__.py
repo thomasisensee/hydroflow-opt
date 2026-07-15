@@ -6,12 +6,19 @@ from flow_opt.cases import CasePlugin, case_from_name
 from flow_opt.config import FlowOptConfig, OptimizationConfig, load_config
 from flow_opt.models import (
     Candidate,
+    EvaluationBackend,
+    EvaluationContext,
     EvaluationResult,
     EvaluationStatus,
     ParameterSpace,
     ResourceRequest,
 )
-from flow_opt.runner import RunSummary, run_local, run_optimization
+from flow_opt.runner import (
+    RunSummary,
+    resume_optimization,
+    run_local,
+    run_optimization,
+)
 
 try:
     __version__ = metadata.version(__package__)
@@ -22,6 +29,8 @@ del metadata
 __all__ = [
     "Candidate",
     "CasePlugin",
+    "EvaluationBackend",
+    "EvaluationContext",
     "EvaluationResult",
     "EvaluationStatus",
     "FlowOptConfig",
@@ -33,4 +42,5 @@ __all__ = [
     "load_config",
     "run_local",
     "run_optimization",
+    "resume_optimization",
 ]

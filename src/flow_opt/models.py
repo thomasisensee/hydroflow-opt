@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Self
+from typing import Any, Protocol, Self
 
 
 class EvaluationStatus(str, Enum):
@@ -37,6 +37,17 @@ class Candidate:
 
     id: str
     parameters: dict[str, float]
+
+
+@dataclass(frozen=True)
+class EvaluationContext:
+    """Optimizer-owned identity and position of one evaluation."""
+
+    run_id: str
+    island: int
+    generation: int
+    phase: str
+    position: int
 
 
 @dataclass(frozen=True)
@@ -222,3 +233,14 @@ class EvaluationResult:
             metadata=metadata or {},
             error=error,
         )
+
+
+class EvaluationBackend(Protocol):
+    """Backend-neutral contract for executing one candidate."""
+
+    def evaluate(
+        self,
+        candidate: Candidate,
+        context: EvaluationContext | None = None,
+    ) -> EvaluationResult:
+        """Evaluate a candidate, optionally within an optimization context."""

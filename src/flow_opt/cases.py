@@ -3,7 +3,7 @@
 import sys
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from flow_opt.models import ParameterSpace
 
@@ -72,5 +72,5 @@ def case_from_name(name: str) -> CasePlugin:
             raise TypeError(
                 f"case plugin '{name}' does not implement the case contract"
             )
-        return plugin
+        return cast(CasePlugin, plugin)
     raise ValueError(f"unknown case: {name}")

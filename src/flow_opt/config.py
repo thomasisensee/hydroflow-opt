@@ -18,6 +18,7 @@ class OptimizationConfig:
     differential_weight: float = 0.8
     crossover_rate: float = 0.9
     topology: str = "fully_connected"
+    seed: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -39,6 +40,10 @@ class OptimizationConfig:
         if self.topology != "fully_connected":
             raise ValueError(
                 "only the 'fully_connected' topology is supported"
+            )
+        if self.seed is not None and not 0 <= self.seed <= 0xFFFFFFFF:
+            raise ValueError(
+                "optimization.seed must be an unsigned 32-bit integer"
             )
 
 
@@ -108,7 +113,17 @@ def _parse_optimization(raw: Any) -> OptimizationConfig | None:
         differential_weight=float(raw.get("differential_weight", 0.8)),
         crossover_rate=float(raw.get("crossover_rate", 0.9)),
         topology=str(raw.get("topology", "fully_connected")),
+        seed=_expect_optional_seed(raw),
     )
+
+
+def _expect_optional_seed(raw: dict[str, Any]) -> int | None:
+    value = raw.get("seed")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("'optimization.seed' must be an integer")
+    return value
 
 
 def _parse_candidates(raw: Any) -> list[Candidate]:
