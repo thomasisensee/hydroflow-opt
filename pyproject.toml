@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 
 [project]
-name = "flow-opt"
+name = "hydroflow-opt"
 description = "Reusable orchestration for simulation-based optimization workflows"
 readme = "README.md"
 maintainers = [
@@ -49,14 +49,14 @@ tests = [
 
 
 [project.scripts]
-flow-opt = "flow_opt.cli:main"
+hydroflow-opt = "hydroflow_opt.cli:main"
 
 [project.urls]
-repository = "https://github.com/thomasisensee/flow-opt"
+repository = "https://github.com/thomasisensee/hydroflow-opt"
 
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/flow_opt"]
+packages = ["src/hydroflow_opt"]
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -82,6 +82,6 @@ select = [
 
 [[tool.uv.index]]
 name = "testpypi"
-url = "https://test.pypi.org/flow-opt/"
+url = "https://test.pypi.org/hydroflow-opt/"
 publish-url = "https://test.pypi.org/legacy/"
 explicit = true

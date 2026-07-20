@@ -4,29 +4,29 @@ User API
 Core models
 -----------
 
-.. automodule:: flow_opt.models
+.. automodule:: hydroflow_opt.models
     :members:
 
 Configuration
 -------------
 
-.. automodule:: flow_opt.config
+.. automodule:: hydroflow_opt.config
     :members:
 
 Cases
 -----
 
-.. automodule:: flow_opt.cases
+.. automodule:: hydroflow_opt.cases
     :members:
 
 Runner
 ------
 
-.. automodule:: flow_opt.runner
+.. automodule:: hydroflow_opt.runner
     :members:
 
 CLI
 ---
 
-.. automodule:: flow_opt.cli
+.. automodule:: hydroflow_opt.cli
     :members:

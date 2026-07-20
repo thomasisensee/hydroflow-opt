@@ -7,7 +7,7 @@
 
 # -- Project information -----------------------------------------------------
 
-project = "flow-opt"
+project = "hydroflow-opt"
 copyright = "2026, Thomas Isensee"
 author = "Thomas Isensee"
 

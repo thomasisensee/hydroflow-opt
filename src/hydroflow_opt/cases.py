@@ -5,7 +5,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from flow_opt.models import ParameterSpace
+from hydroflow_opt.models import ParameterSpace
 
 
 class CasePlugin(Protocol):
@@ -43,7 +43,7 @@ class QuadraticCase:
         return [
             sys.executable,
             "-m",
-            "flow_opt.toy_worker",
+            "hydroflow_opt.toy_worker",
             str(request_path),
             str(result_path),
         ]
@@ -55,7 +55,7 @@ def case_from_name(name: str) -> CasePlugin:
     if name == "quadratic":
         return QuadraticCase()
 
-    entries = metadata.entry_points(group="flow_opt.cases")
+    entries = metadata.entry_points(group="hydroflow_opt.cases")
     for entry in entries:
         if entry.name != name:
             continue
