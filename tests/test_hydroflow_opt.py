@@ -3,10 +3,9 @@
 import json
 from pathlib import Path
 
+import hydroflow_opt.runner as runner
 import pytest
-
-import flow_opt.runner as runner
-from flow_opt import (
+from hydroflow_opt import (
     Candidate,
     EvaluationResult,
     EvaluationStatus,
@@ -16,8 +15,8 @@ from flow_opt import (
     load_config,
     run_local,
 )
-from flow_opt.cli import main
-from flow_opt.runner import (
+from hydroflow_opt.cli import main
+from hydroflow_opt.runner import (
     SubprocessBackend,
     inspect_run,
     resume_optimization,

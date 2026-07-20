@@ -16,9 +16,9 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from flow_opt.cases import CasePlugin, case_from_name
-from flow_opt.config import FlowOptConfig, OptimizationConfig
-from flow_opt.models import (
+from hydroflow_opt.cases import CasePlugin, case_from_name
+from hydroflow_opt.config import FlowOptConfig, OptimizationConfig
+from hydroflow_opt.models import (
     Candidate,
     EvaluationBackend,
     EvaluationContext,
@@ -597,7 +597,7 @@ def _provenance(case: CasePlugin) -> dict[str, Any]:
         "python": platform.python_version(),
         "platform": platform.platform(),
         "packages": {
-            "flow_opt": _package_version("flow_opt"),
+            "hydroflow_opt": _package_version("hydroflow_opt"),
             "pygmo": _package_version("pygmo"),
             "numpy": _package_version("numpy"),
         },
@@ -896,6 +896,6 @@ def _import_pygmo() -> Any:
         import pygmo as pg  # type: ignore[import-untyped]
     except ImportError as exc:  # pragma: no cover - required in releases.
         raise RuntimeError(
-            "pygmo is required for flow-opt optimization"
+            "pygmo is required for hydroflow-opt optimization"
         ) from exc
     return pg

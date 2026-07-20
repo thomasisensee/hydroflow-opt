@@ -11,7 +11,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = argv if argv is not None else sys.argv[1:]
     if len(args) != 2:
-        raise SystemExit("usage: python -m flow_opt.toy_worker REQUEST RESULT")
+        raise SystemExit(
+            "usage: python -m hydroflow_opt.toy_worker REQUEST RESULT"
+        )
     request_path, result_path = (Path(value) for value in args)
     request = json.loads(request_path.read_text(encoding="utf-8"))
     start = time.perf_counter()

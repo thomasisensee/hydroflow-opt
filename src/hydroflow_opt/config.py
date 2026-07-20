@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flow_opt.models import Candidate, ResourceRequest
+from hydroflow_opt.models import Candidate, ResourceRequest
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class FlowOptConfig:
 
 
 def load_config(path: str | Path) -> FlowOptConfig:
-    """Load and validate a ``flow-opt`` TOML configuration."""
+    """Load and validate a ``hydroflow-opt`` TOML configuration."""
 
     config_path = Path(path).resolve()
     with config_path.open("rb") as stream:

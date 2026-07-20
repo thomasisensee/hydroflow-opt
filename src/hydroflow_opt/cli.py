@@ -3,9 +3,9 @@
 import argparse
 from pathlib import Path
 
-from flow_opt.cases import case_from_name
-from flow_opt.config import load_config
-from flow_opt.runner import (
+from hydroflow_opt.cases import case_from_name
+from hydroflow_opt.config import load_config
+from hydroflow_opt.runner import (
     inspect_run,
     resume_optimization,
     run_local,
@@ -14,9 +14,9 @@ from flow_opt.runner import (
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the ``flow-opt`` command line interface."""
+    """Run the ``hydroflow-opt`` command line interface."""
 
-    parser = argparse.ArgumentParser(prog="flow-opt")
+    parser = argparse.ArgumentParser(prog="hydroflow-opt")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("check", "run", "optimize"):
         child = subparsers.add_parser(command)

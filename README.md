@@ -1,12 +1,12 @@
-# flow-opt
+# hydroflow-opt
 
-`flow-opt` is a Linux/Python 3.11–3.13 orchestration package for
+`hydroflow-opt` is a Linux/Python 3.11–3.13 orchestration package for
 simulation-based optimization. It uses pygmo's island model and runs individual
 case evaluations in isolated subprocesses.
 
 Cases are supplied by installed plugins. The package includes a deterministic
 `quadratic` case for laptop development and tests. A real case, such as
-`flow-opt-hydrofoil`, depends on `flow-opt` rather than the reverse.
+`hydroflow-opt-hydrofoil`, depends on `hydroflow-opt` rather than the reverse.
 
 ## Installation
 
@@ -19,14 +19,14 @@ python -m pip install --editable '.[tests]'
 ```
 
 `pygmo` is a required dependency. A simulation case may have additional
-runtime prerequisites, but those must not be imported by `flow-opt` itself.
+runtime prerequisites, but those must not be imported by `hydroflow-opt` itself.
 
 ## Run explicit candidates
 
 ```bash
-flow-opt check examples/quadratic.toml
-flow-opt run examples/quadratic.toml
-flow-opt inspect examples/runs/quadratic
+hydroflow-opt check examples/quadratic.toml
+hydroflow-opt run examples/quadratic.toml
+hydroflow-opt inspect examples/runs/quadratic
 ```
 
 ```toml
@@ -57,7 +57,7 @@ directory under the run directory. The resource invariant is:
 concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus
 ```
 
-`flow-opt` refuses a configuration that violates it. A case may use the
+`hydroflow-opt` refuses a configuration that violates it. A case may use the
 allocated MPI rank count internally, but it must never choose global
 concurrency or use an oversubscription flag.
 
@@ -77,7 +77,7 @@ seed = 12345 # optional; generated and recorded when omitted
 ```
 
 ```bash
-flow-opt optimize path/to/config.toml
+hydroflow-opt optimize path/to/config.toml
 ```
 
 Optimization runs write an atomic JSON checkpoint after initialization and
@@ -85,12 +85,12 @@ after every generation. Resume an interrupted run using its stored effective
 configuration:
 
 ```bash
-flow-opt resume path/to/run-directory
+hydroflow-opt resume path/to/run-directory
 ```
 
 Software and platform versions are recorded in `manifest.json`. Compatible
 version changes produce warnings when resuming rather than blocking the run;
-flow-opt treats deterministic replay as best-effort.
+hydroflow-opt treats deterministic replay as best-effort.
 
 The initial implementation supports pygmo differential evolution and a
 fully-connected archipelago. Islands use pygmo multiprocessing and therefore
@@ -100,7 +100,7 @@ parameter names, bounds, and decoding; optimization settings are per run.
 
 ## Write a case plugin
 
-Publish an entry point in the `flow_opt.cases` group. Its plugin object exposes
+Publish an entry point in the `hydroflow_opt.cases` group. Its plugin object exposes
 a `parameter_space(options)` method and a `worker_command(request, result)`
 method. The command receives JSON paths and must write one structured result.
 The worker protocol lets a future Slurm backend launch exactly the same case

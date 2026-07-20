@@ -2,9 +2,9 @@
 
 from importlib import metadata
 
-from flow_opt.cases import CasePlugin, case_from_name
-from flow_opt.config import FlowOptConfig, OptimizationConfig, load_config
-from flow_opt.models import (
+from hydroflow_opt.cases import CasePlugin, case_from_name
+from hydroflow_opt.config import FlowOptConfig, OptimizationConfig, load_config
+from hydroflow_opt.models import (
     Candidate,
     EvaluationBackend,
     EvaluationContext,
@@ -13,7 +13,7 @@ from flow_opt.models import (
     ParameterSpace,
     ResourceRequest,
 )
-from flow_opt.runner import (
+from hydroflow_opt.runner import (
     RunSummary,
     resume_optimization,
     run_local,
