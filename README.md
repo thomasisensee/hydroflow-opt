@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/pypi/l/hydroflow-opt?label=License)](https://opensource.org/licenses/MIT)
 [![Build](https://github.com/thomasisensee/hydroflow-opt/actions/workflows/ci.yml/badge.svg)](https://github.com/thomasisensee/hydroflow-opt/actions)
-[![codecov](https://codecov.io/gh/thomasisensee/hydroflow-opt/graph/badge.svg?flag=python&token=5N4GQ0YP7I)](https://codecov.io/gh/thomasisensee/hydroflow-opt)
+[![codecov](https://codecov.io/gh/thomasisensee/hydroflow-opt/graph/badge.svg?token=KTY4LT5GNW)](https://codecov.io/gh/thomasisensee/hydroflow-opt)
 [![pre-commit.ci](https://results.pre-commit.ci/badge/github/thomasisensee/hydroflow-opt/main.svg)](https://results.pre-commit.ci/latest/github/thomasisensee/hydroflow-opt/main)
 [![PyPI](https://img.shields.io/pypi/v/hydroflow-opt?logo=pypi&logoColor=gold&label=PyPI)](https://pypi.org/project/hydroflow-opt)
 [![Python](https://img.shields.io/pypi/pyversions/hydroflow-opt?logo=python&logoColor=gold&label=Python)](https://pypi.org/project/hydroflow-opt)
