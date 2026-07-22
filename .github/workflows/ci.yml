@@ -53,7 +53,7 @@ jobs:
     - name: Install Python package
       working-directory: ${{ github.workspace }}
       run: |
-        python -m pip install .[tests]
+        python -m pip install -v -e .[tests]
 
     - name: Run Python tests
       working-directory: ${{ github.workspace }}
@@ -76,6 +76,7 @@ jobs:
         disable_search: true
         fail_ci_if_error: true
         files: ${{github.workspace}}/coverage.xml
-        token: ${{ secrets.CODECOV_TOKEN }}
+        plugins: noop
         slug: thomasisensee/hydroflow-opt
+        token: ${{ secrets.CODECOV_TOKEN }}
         verbose: true
