@@ -62,5 +62,9 @@ jobs:
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v7
       with:
+        disable_search: true
         fail_ci_if_error: true
-        files: ./tests/coverage.xml
+        files: ${{github.workspace}}/tests/coverage.xml
+        token: ${{ secrets.CODECOV_TOKEN }}
+        slug: thomasisensee/hydroflow-opt
+        verbose: true
