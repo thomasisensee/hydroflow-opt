@@ -3,8 +3,9 @@
 import json
 from pathlib import Path
 
-import hydroflow_opt.runner as runner
 import pytest
+
+import hydroflow_opt.runner as runner
 from hydroflow_opt import (
     Candidate,
     EvaluationResult,
