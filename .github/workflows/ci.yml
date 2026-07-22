@@ -51,20 +51,31 @@ jobs:
         python-version: "3.13"
 
     - name: Install Python package
+      working-directory: ${{ github.workspace }}
       run: |
         python -m pip install .[tests]
 
     - name: Run Python tests
-      working-directory: ./tests
+      working-directory: ${{ github.workspace }}
       run: |
-        python -m pytest --cov --cov-report=xml
+        python -m pytest \
+          --cov=hydroflow_opt \
+          --cov-report=term-missing \
+          --cov-report=xml:coverage.xml
+
+    - name: Inspect coverage report
+      working-directory: ${{ github.workspace }}
+      run: |
+        ls -lh coverage.xml
+        python -m coverage report
+        head -30 coverage.xml
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v7
       with:
         disable_search: true
         fail_ci_if_error: true
-        files: ${{github.workspace}}/tests/coverage.xml
+        files: ${{github.workspace}}/coverage.xml
         token: ${{ secrets.CODECOV_TOKEN }}
         slug: thomasisensee/hydroflow-opt
         verbose: true
