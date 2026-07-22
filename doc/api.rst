@@ -1,9 +1,32 @@
 User API
 ========
 
-.. toctree::
+Core models
+-----------
 
-This is an example function:
+.. automodule:: hydroflow_opt.models
+    :members:
 
-.. automodule:: flow_opt
+Configuration
+-------------
+
+.. automodule:: hydroflow_opt.config
+    :members:
+
+Cases
+-----
+
+.. automodule:: hydroflow_opt.cases
+    :members:
+
+Runner
+------
+
+.. automodule:: hydroflow_opt.runner
+    :members:
+
+CLI
+---
+
+.. automodule:: hydroflow_opt.cli
     :members:

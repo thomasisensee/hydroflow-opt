@@ -1,4 +1,4 @@
-This is the list of copyright holders of flow-opt.
+This is the list of copyright holders of hydroflow-opt.
 
 For information on the license, see LICENSE.md.
 

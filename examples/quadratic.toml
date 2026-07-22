@@ -1,0 +1,24 @@
+[run]
+directory = "runs/quadratic"
+scratch_directory = "runs/quadratic/scratch"
+
+[case]
+name = "quadratic"
+
+[resources]
+available_cpus = 1
+concurrent_evaluations = 1
+mpi_ranks = 1
+threads_per_rank = 1
+
+[[candidate]]
+id = "baseline"
+[candidate.parameters]
+alpha = 1.0
+beta = 2.0
+
+[[candidate]]
+id = "near-zero"
+[candidate.parameters]
+alpha = 0.1
+beta = -0.2

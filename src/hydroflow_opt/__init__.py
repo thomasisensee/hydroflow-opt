@@ -1,0 +1,46 @@
+"""Reusable orchestration primitives for simulation-based optimization."""
+
+from importlib import metadata
+
+from hydroflow_opt.cases import CasePlugin, case_from_name
+from hydroflow_opt.config import FlowOptConfig, OptimizationConfig, load_config
+from hydroflow_opt.models import (
+    Candidate,
+    EvaluationBackend,
+    EvaluationContext,
+    EvaluationResult,
+    EvaluationStatus,
+    ParameterSpace,
+    ResourceRequest,
+)
+from hydroflow_opt.runner import (
+    RunSummary,
+    resume_optimization,
+    run_local,
+    run_optimization,
+)
+
+try:
+    __version__ = metadata.version(__package__)
+except metadata.PackageNotFoundError:  # pragma: no cover
+    __version__ = "0+unknown"
+del metadata
+
+__all__ = [
+    "Candidate",
+    "CasePlugin",
+    "EvaluationBackend",
+    "EvaluationContext",
+    "EvaluationResult",
+    "EvaluationStatus",
+    "FlowOptConfig",
+    "OptimizationConfig",
+    "ParameterSpace",
+    "ResourceRequest",
+    "RunSummary",
+    "case_from_name",
+    "load_config",
+    "run_local",
+    "run_optimization",
+    "resume_optimization",
+]
