@@ -1,24 +1,28 @@
 """Tests that need no CFD runtime or scheduler."""
 
 import json
+import pickle
+import subprocess
 from pathlib import Path
 
 import pytest
 
 import hydroflow_opt.runner as runner
 from hydroflow_opt import (
+    BackendKind,
     Candidate,
     EvaluationResult,
     EvaluationStatus,
     ParameterSpace,
     ResourceRequest,
+    SlurmBackend,
+    SubprocessBackend,
     case_from_name,
     load_config,
     run_local,
 )
 from hydroflow_opt.cli import main
 from hydroflow_opt.runner import (
-    SubprocessBackend,
     inspect_run,
     resume_optimization,
     run_optimization,
@@ -33,8 +37,24 @@ class InMemoryBackend:
         return EvaluationResult.success(candidate.id, objective)
 
 
-def write_config(tmp_path, *, concurrent=1, mpi_ranks=1, name="run"):
+def write_config(
+    tmp_path,
+    *,
+    concurrent=1,
+    mpi_ranks=1,
+    threads_per_rank=1,
+    name="run",
+    backend=None,
+):
     config_path = tmp_path / f"{name}.toml"
+    execution = (
+        ""
+        if backend is None
+        else f"""
+[execution]
+backend = "{backend}"
+"""
+    )
     config_path.write_text(
         f"""[run]
 directory = "{name}"
@@ -42,12 +62,13 @@ scratch_directory = "{name}-scratch"
 
 [case]
 name = "quadratic"
+{execution}
 
 [resources]
-available_cpus = {concurrent * mpi_ranks}
+available_cpus = {concurrent * mpi_ranks * threads_per_rank}
 concurrent_evaluations = {concurrent}
 mpi_ranks = {mpi_ranks}
-threads_per_rank = 1
+threads_per_rank = {threads_per_rank}
 
 [[candidate]]
 id = "a"
@@ -116,7 +137,17 @@ def test_load_config(tmp_path):
     assert config.run_dir == tmp_path / "run"
     assert config.case_name == "quadratic"
     assert config.resources.total_requested_cpus == 4
+    assert config.execution.backend is BackendKind.LOCAL
     assert [candidate.id for candidate in config.candidates] == ["a", "b"]
+
+
+def test_load_config_selects_slurm_and_rejects_unknown_backend(tmp_path):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    assert config.execution.backend is BackendKind.SLURM
+
+    invalid = write_config(tmp_path, name="invalid", backend="unknown")
+    with pytest.raises(ValueError, match="local, slurm"):
+        load_config(invalid)
 
 
 def test_run_local_writes_isolated_results(tmp_path):
@@ -142,6 +173,13 @@ def test_cli_check_run_and_inspect(tmp_path, capsys):
     assert "run complete" in capsys.readouterr().out
     assert main(["inspect", str(tmp_path / "run")]) == 0
     assert "2/2 succeeded" in capsys.readouterr().out
+
+
+def test_cli_check_accepts_slurm_without_active_allocation(tmp_path, capsys):
+    config_path = write_config(tmp_path, backend="slurm")
+    assert main(["check", str(config_path)]) == 0
+    assert "configuration ok" in capsys.readouterr().out
+    assert not (tmp_path / "run").exists()
 
 
 def test_run_requires_candidates(tmp_path):
@@ -340,6 +378,193 @@ def test_subprocess_backend_archives_mismatched_unfinished_attempt(tmp_path):
     attempt = tmp_path / "run" / "evaluations" / "a" / "attempts"
     assert (attempt / "attempt-0001" / "request.json").exists()
     assert (attempt / "attempt-0001" / "result.json").exists()
+
+
+def test_builtin_backends_are_pickle_safe(tmp_path):
+    config = load_config(write_config(tmp_path))
+    case = case_from_name("quadratic")
+    for backend in (
+        SubprocessBackend(config, case),
+        SlurmBackend(config, case),
+    ):
+        restored = pickle.loads(pickle.dumps(backend))
+        assert type(restored) is type(backend)
+        assert restored.config == config
+
+
+def test_slurm_requires_allocation_before_creating_run(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="existing sbatch or salloc"):
+        run_local(config)
+
+    assert not config.run_dir.exists()
+
+
+def test_slurm_requires_srun_before_creating_run(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: None
+    )
+
+    with pytest.raises(RuntimeError, match="srun"):
+        run_local(config)
+
+    assert not config.run_dir.exists()
+
+
+def test_slurm_wraps_one_worker_with_candidate_cpu_shape(
+    tmp_path, monkeypatch
+):
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            mpi_ranks=2,
+            threads_per_rank=3,
+        )
+    )
+    backend = SlurmBackend(config, case_from_name("quadratic"))
+    candidate = config.candidates[0]
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        request = json.loads(Path(command[-2]).read_text(encoding="utf-8"))
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "candidate_id": request["candidate"]["id"],
+                    "status": "success",
+                    "objective": 25.0,
+                    "metadata": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "worker out", "")
+
+    monkeypatch.setenv("SLURM_JOB_ID", "456")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = backend.evaluate(candidate)
+
+    assert commands == [
+        [
+            "srun",
+            "--exclusive",
+            "--nodes=1",
+            "--ntasks=1",
+            "--cpus-per-task=6",
+            *case_from_name("quadratic").worker_command(
+                config.run_dir / "evaluations" / "a" / "request.json",
+                config.run_dir / "evaluations" / "a" / "result.json",
+            ),
+        ]
+    ]
+    assert result.objective == 25.0
+    assert result.metadata["slurm_job_id"] == "456"
+    assert (config.run_dir / "evaluations" / "a" / "stdout.log").read_text(
+        encoding="utf-8"
+    ) == "worker out"
+
+
+def test_slurm_cache_avoids_a_second_srun(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    backend = SlurmBackend(config, case_from_name("quadratic"))
+    candidate = config.candidates[0]
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "candidate_id": candidate.id,
+                    "status": "success",
+                    "objective": 25.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("SLURM_JOB_ID", "789")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend.evaluate(candidate).objective == 25.0
+    assert backend.evaluate(candidate).objective == 25.0
+    assert calls == 1
+
+
+def test_slurm_cli_run_uses_configured_backend(tmp_path, monkeypatch):
+    config_path = write_config(tmp_path, backend="slurm")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        request = json.loads(Path(command[-2]).read_text(encoding="utf-8"))
+        parameters = request["candidate"]["parameters"]
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "candidate_id": request["candidate"]["id"],
+                    "status": "success",
+                    "objective": sum(
+                        value**2 for value in parameters.values()
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert main(["run", str(config_path)]) == 0
+    assert len(commands) == 2
+    assert all(command[0] == "srun" for command in commands)
+
+
+def test_manifest_records_execution_and_schema_one_defaults_local(tmp_path):
+    pytest.importorskip("pygmo")
+    config_path = write_config(tmp_path, backend="slurm")
+    add_optimization(config_path, seed=17)
+    run_optimization(
+        load_config(config_path),
+        backend=InMemoryBackend(),
+    )
+    manifest_path = tmp_path / "run" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == 2
+    assert manifest["config"]["execution"] == {"backend": "slurm"}
+    assert manifest["provenance"][0]["execution_backend"].endswith(
+        "InMemoryBackend"
+    )
+
+    manifest["schema_version"] = 1
+    manifest["status"] = "running"
+    manifest["config"].pop("execution")
+    manifest["config_hash"] = runner._json_hash(manifest["config"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.warns(RuntimeWarning, match="execution_backend"):
+        summary = resume_optimization(tmp_path / "run")
+    assert summary.failed == 0
 
 
 def test_two_islands_restore_migration_database_between_generations(tmp_path):

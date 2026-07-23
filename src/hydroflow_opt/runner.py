@@ -6,8 +6,6 @@ import os
 import platform
 import secrets
 import shutil
-import subprocess
-import threading
 import uuid
 import warnings
 from dataclasses import asdict, dataclass, replace
@@ -16,9 +14,27 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from hydroflow_opt.backends import (
+    SubprocessBackend as SubprocessBackend,
+)
+from hydroflow_opt.backends import (
+    backend_from_config,
+    validate_execution_environment,
+)
+from hydroflow_opt.backends.worker import (
+    archive_attempt,
+    result_from_json,
+    result_to_json,
+    write_result,
+)
 from hydroflow_opt.cases import CasePlugin, case_from_name
-from hydroflow_opt.config import FlowOptConfig, OptimizationConfig
+from hydroflow_opt.config import (
+    ExecutionConfig,
+    FlowOptConfig,
+    OptimizationConfig,
+)
 from hydroflow_opt.models import (
+    BackendKind,
     Candidate,
     EvaluationBackend,
     EvaluationContext,
@@ -27,7 +43,8 @@ from hydroflow_opt.models import (
     ResourceRequest,
 )
 
-_MANIFEST_SCHEMA = 1
+_MANIFEST_SCHEMA = 2
+_SUPPORTED_MANIFEST_SCHEMAS = {1, _MANIFEST_SCHEMA}
 _CHECKPOINT_SCHEMA = 1
 _PENALTY = 1.0e12
 
@@ -43,119 +60,6 @@ class RunSummary:
     summary_path: Path
 
 
-class SubprocessBackend:
-    """Run isolated case workers within a fixed resource budget."""
-
-    def __init__(self, config: FlowOptConfig, case: CasePlugin) -> None:
-        self.config = config
-        self.case = case
-        self._slots = threading.BoundedSemaphore(
-            config.resources.concurrent_evaluations
-        )
-
-    def evaluate(
-        self,
-        candidate: Candidate,
-        context: EvaluationContext | None = None,
-    ) -> EvaluationResult:
-        """Run one worker and convert worker/protocol errors to results."""
-
-        evaluation_dir = self.config.run_dir / "evaluations" / candidate.id
-        scratch_dir = self.config.scratch_dir / candidate.id
-        evaluation_dir.mkdir(parents=True, exist_ok=True)
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-        request_path = evaluation_dir / "request.json"
-        result_path = evaluation_dir / "result.json"
-        request = {
-            "candidate": asdict(candidate),
-            "case": {
-                "name": self.config.case_name,
-                "options": self.config.case_options,
-            },
-            "context": {
-                "run_dir": str(self.config.run_dir),
-                "scratch_dir": str(scratch_dir),
-                "resources": asdict(self.config.resources),
-                "optimization": asdict(context) if context else None,
-            },
-        }
-        cached = self._cached_result(
-            request, request_path, result_path, evaluation_dir
-        )
-        if cached is not None:
-            return cached
-
-        request_path.write_text(
-            json.dumps(request, indent=2) + "\n", encoding="utf-8"
-        )
-        environment = os.environ.copy()
-        environment["OMP_NUM_THREADS"] = str(
-            self.config.resources.threads_per_rank
-        )
-        with self._slots:
-            completed = subprocess.run(
-                self.case.worker_command(request_path, result_path),
-                check=False,
-                cwd=evaluation_dir,
-                env=environment,
-                capture_output=True,
-                text=True,
-            )
-        (evaluation_dir / "stdout.log").write_text(
-            completed.stdout, encoding="utf-8"
-        )
-        (evaluation_dir / "stderr.log").write_text(
-            completed.stderr, encoding="utf-8"
-        )
-        if completed.returncode != 0:
-            result = EvaluationResult.failed(
-                candidate.id,
-                f"worker exited with status {completed.returncode}",
-                metadata={"evaluation_dir": str(evaluation_dir)},
-            )
-            _write_result(result_path, result)
-            return result
-        try:
-            raw = json.loads(result_path.read_text(encoding="utf-8"))
-            return _result_from_json(raw, candidate.id, evaluation_dir)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            result = EvaluationResult.failed(
-                candidate.id,
-                f"invalid worker result: {exc}",
-                metadata={"evaluation_dir": str(evaluation_dir)},
-            )
-            _write_result(result_path, result)
-            return result
-
-    def _cached_result(
-        self,
-        request: dict[str, Any],
-        request_path: Path,
-        result_path: Path,
-        evaluation_dir: Path,
-    ) -> EvaluationResult | None:
-        if not request_path.exists():
-            return None
-        try:
-            previous_request = json.loads(
-                request_path.read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError, json.JSONDecodeError):
-            _archive_attempt(evaluation_dir)
-            return None
-        if previous_request != request:
-            _archive_attempt(evaluation_dir)
-            return None
-        try:
-            raw = json.loads(result_path.read_text(encoding="utf-8"))
-            return _result_from_json(
-                raw, str(request["candidate"]["id"]), evaluation_dir
-            )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            _archive_attempt(evaluation_dir)
-            return None
-
-
 def run_local(
     config: FlowOptConfig,
     *,
@@ -166,10 +70,11 @@ def run_local(
 
     if not config.candidates:
         raise ValueError("'run' requires at least one [[candidate]] entry")
+    case = case_from_name(config.case_name)
+    if backend is None:
+        validate_execution_environment(config)
+    evaluator = backend or backend_from_config(config, case)
     _prepare_run(config, config_path)
-    evaluator = backend or SubprocessBackend(
-        config, case_from_name(config.case_name)
-    )
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(
@@ -188,6 +93,8 @@ def run_optimization(
     """Start a new resumable pygmo DE optimization."""
 
     _validate_optimization(config)
+    if backend is None:
+        validate_execution_environment(config)
     pg = _import_pygmo()
     _prepare_new_optimization_run(config, config_path)
     optimization = config.optimization
@@ -203,7 +110,9 @@ def run_optimization(
     )
     case = case_from_name(resolved.case_name)
     space = case.parameter_space(resolved.case_options)
-    manifest = _new_manifest(resolved, case, space)
+    manifest = _new_manifest(
+        resolved, case, space, _backend_name(resolved, backend)
+    )
     _atomic_json(_manifest_path(resolved.run_dir), manifest)
     return _continue_optimization(resolved, manifest, pg, backend)
 
@@ -217,7 +126,7 @@ def resume_optimization(
 
     run_path = Path(run_dir).resolve()
     manifest = _read_json(_manifest_path(run_path))
-    if manifest.get("schema_version") != _MANIFEST_SCHEMA:
+    if manifest.get("schema_version") not in _SUPPORTED_MANIFEST_SCHEMAS:
         raise ValueError("unsupported optimization manifest schema")
     if manifest.get("kind") != "optimization":
         raise ValueError("run is not a resumable optimization")
@@ -228,12 +137,14 @@ def resume_optimization(
 
     config = _config_from_manifest(run_path, manifest["config"])
     _validate_optimization(config)
+    if backend is None:
+        validate_execution_environment(config)
     pg = _import_pygmo()
     case = case_from_name(config.case_name)
     space = case.parameter_space(config.case_options)
     _validate_parameter_space(manifest["parameter_space"], space)
 
-    provenance = _provenance(case)
+    provenance = _provenance(case, _backend_name(config, backend))
     compatibility_warnings = _provenance_warnings(
         manifest["provenance"][-1], provenance
     )
@@ -295,7 +206,7 @@ class _OptimizationProblem:
             id=candidate_id,
             parameters=self.space.decode(tuple(vector)),
         )
-        evaluator = self.backend or SubprocessBackend(
+        evaluator = self.backend or backend_from_config(
             self.config, case_from_name(self.config.case_name)
         )
         result = _evaluate_optimization_candidate(
@@ -545,10 +456,13 @@ def _prepare_run(config: FlowOptConfig, config_path: Path | None) -> None:
 
 
 def _new_manifest(
-    config: FlowOptConfig, case: CasePlugin, space: Any
+    config: FlowOptConfig,
+    case: CasePlugin,
+    space: Any,
+    backend_name: str,
 ) -> dict[str, Any]:
     effective = _effective_config(config)
-    provenance = _provenance(case)
+    provenance = _provenance(case, backend_name)
     provenance["started_at"] = _now()
     return {
         "schema_version": _MANIFEST_SCHEMA,
@@ -577,6 +491,7 @@ def _effective_config(config: FlowOptConfig) -> dict[str, Any]:
         "case_name": config.case_name,
         "case_options": config.case_options,
         "resources": asdict(config.resources),
+        "execution": {"backend": config.execution.backend.value},
         "optimization": asdict(config.optimization),
     }
 
@@ -588,14 +503,20 @@ def _config_from_manifest(run_dir: Path, raw: dict[str, Any]) -> FlowOptConfig:
         case_name=str(raw["case_name"]),
         case_options=dict(raw["case_options"]),
         resources=ResourceRequest(**raw["resources"]),
+        execution=ExecutionConfig(
+            backend=BackendKind(
+                raw.get("execution", {}).get("backend", "local")
+            )
+        ),
         optimization=OptimizationConfig(**raw["optimization"]),
     )
 
 
-def _provenance(case: CasePlugin) -> dict[str, Any]:
+def _provenance(case: CasePlugin, backend_name: str) -> dict[str, Any]:
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
+        "execution_backend": backend_name,
         "packages": {
             "hydroflow_opt": _package_version("hydroflow_opt"),
             "pygmo": _package_version("pygmo"),
@@ -627,13 +548,28 @@ def _provenance_warnings(
     previous: dict[str, Any], current: dict[str, Any]
 ) -> list[str]:
     messages: list[str] = []
-    for label in ("python", "platform", "packages", "case_plugin"):
+    for label in (
+        "python",
+        "platform",
+        "execution_backend",
+        "packages",
+        "case_plugin",
+    ):
         if previous.get(label) != current.get(label):
             messages.append(
                 f"resume environment differs for {label}: "
                 f"{previous.get(label)!r} -> {current.get(label)!r}"
             )
     return messages
+
+
+def _backend_name(
+    config: FlowOptConfig, backend: EvaluationBackend | None
+) -> str:
+    if backend is None:
+        return config.execution.backend.value
+    backend_type = type(backend)
+    return f"{backend_type.__module__}.{backend_type.__qualname__}"
 
 
 def _validate_parameter_space(raw: dict[str, Any], space: Any) -> None:
@@ -735,7 +671,7 @@ def _read_owned_results(
     for candidate_id in evaluation_ids:
         evaluation_dir = config.run_dir / "evaluations" / candidate_id
         raw = _read_json(evaluation_dir / "outcome.json")
-        results.append(_result_from_json(raw, candidate_id, evaluation_dir))
+        results.append(result_from_json(raw, candidate_id, evaluation_dir))
     return results
 
 
@@ -761,20 +697,20 @@ def _evaluate_optimization_candidate(
         try:
             previous = _read_json(identity_path)
         except (OSError, ValueError, json.JSONDecodeError):
-            _archive_attempt(evaluation_dir)
+            archive_attempt(evaluation_dir)
         else:
             if previous != identity:
-                _archive_attempt(evaluation_dir)
+                archive_attempt(evaluation_dir)
             elif outcome_path.exists():
                 try:
-                    return _result_from_json(
+                    return result_from_json(
                         _read_json(outcome_path), candidate.id, evaluation_dir
                     )
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     pass
     _atomic_json(identity_path, identity)
     result = backend.evaluate(candidate, context)
-    _write_result(outcome_path, result)
+    write_result(outcome_path, result)
     return result
 
 
@@ -785,7 +721,7 @@ def _write_summary(
     _atomic_text(
         results_path,
         "".join(
-            json.dumps(_result_to_json(result)) + "\n" for result in results
+            json.dumps(result_to_json(result)) + "\n" for result in results
         ),
     )
     succeeded = sum(
@@ -800,68 +736,6 @@ def _write_summary(
     )
     _atomic_json(summary.summary_path, asdict(summary))
     return summary
-
-
-def _result_from_json(
-    raw: dict[str, Any], candidate_id: str, evaluation_dir: Path
-) -> EvaluationResult:
-    if raw.get("candidate_id") != candidate_id:
-        raise ValueError("worker result candidate_id does not match request")
-    metadata_value = raw.get("metadata", {})
-    if not isinstance(metadata_value, dict):
-        raise TypeError("worker result metadata must be an object")
-    metadata_copy = dict(metadata_value)
-    metadata_copy["evaluation_dir"] = str(evaluation_dir)
-    status = EvaluationStatus(str(raw["status"]))
-    if status is EvaluationStatus.SUCCESS:
-        return EvaluationResult.success(
-            candidate_id,
-            float(raw["objective"]),
-            timings={
-                str(k): float(v) for k, v in raw.get("timings", {}).items()
-            },
-            metadata=metadata_copy,
-        )
-    return EvaluationResult.failed(
-        candidate_id,
-        str(raw.get("error", "worker reported failure")),
-        timings={str(k): float(v) for k, v in raw.get("timings", {}).items()},
-        metadata=metadata_copy,
-    )
-
-
-def _write_result(path: Path, result: EvaluationResult) -> None:
-    _atomic_json(path, _result_to_json(result))
-
-
-def _result_to_json(result: EvaluationResult) -> dict[str, object]:
-    return {
-        "candidate_id": result.candidate_id,
-        "status": result.status.value,
-        "objective": result.objective,
-        "timings": result.timings,
-        "metadata": result.metadata,
-        "error": result.error,
-    }
-
-
-def _archive_attempt(evaluation_dir: Path) -> None:
-    attempts_dir = evaluation_dir / "attempts"
-    attempts_dir.mkdir(exist_ok=True)
-    number = len([path for path in attempts_dir.iterdir() if path.is_dir()])
-    destination = attempts_dir / f"attempt-{number + 1:04d}"
-    destination.mkdir()
-    for name in (
-        "evaluation.json",
-        "outcome.json",
-        "request.json",
-        "result.json",
-        "stdout.log",
-        "stderr.log",
-    ):
-        source = evaluation_dir / name
-        if source.exists():
-            shutil.move(str(source), destination / name)
 
 
 def _atomic_json(path: Path, value: Any) -> None:

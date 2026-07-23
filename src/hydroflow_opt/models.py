@@ -21,6 +21,13 @@ class EvaluationStatus(str, Enum):
     FAILED = "failed"
 
 
+class BackendKind(str, Enum):
+    """Built-in execution backend selected by run configuration."""
+
+    LOCAL = "local"
+    SLURM = "slurm"
+
+
 @dataclass(frozen=True)
 class Candidate:
     """Input parameters for one workflow evaluation.
