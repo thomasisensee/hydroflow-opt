@@ -68,6 +68,53 @@ concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus
 allocated MPI rank count internally, but it must never choose global
 concurrency or use an oversubscription flag.
 
+## Execute candidates with Slurm
+
+Local subprocess execution is the default. To launch candidates as Slurm job
+steps, select the backend explicitly:
+
+```toml
+[execution]
+backend = "slurm"
+```
+
+The command must run inside an allocation created by `sbatch` or `salloc`.
+`hydroflow-opt` deliberately refuses to invoke `srun` without
+`SLURM_JOB_ID`, preventing candidates from becoming separately queued jobs.
+For example:
+
+```bash
+#!/bin/bash
+#SBATCH --nodes=2
+#SBATCH --ntasks=4
+#SBATCH --cpus-per-task=2
+
+hydroflow-opt optimize hydrofoil.toml
+```
+
+with:
+
+```toml
+[execution]
+backend = "slurm"
+
+[resources]
+available_cpus = 8
+concurrent_evaluations = 4
+mpi_ranks = 2
+threads_per_rank = 1
+```
+
+Each candidate is launched as one
+`srun --exclusive --nodes=1 --ntasks=1` step which reserves
+`mpi_ranks × threads_per_rank` CPUs. The allocation may span nodes, but one
+candidate must fit on one node. Partition, time limit, node count, and total
+allocation size remain properties of the outer Slurm job.
+
+The worker runs exactly once and may use its reserved CPUs through an internal
+MPI launcher. Fully Slurm-native solver launching and multi-node candidates are
+not supported yet.
+
 ## Optimize with islands
 
 Add an `[optimization]` table and use `optimize`:
@@ -97,7 +144,8 @@ hydroflow-opt resume path/to/run-directory
 
 Software and platform versions are recorded in `manifest.json`. Compatible
 version changes produce warnings when resuming rather than blocking the run;
-hydroflow-opt treats deterministic replay as best-effort.
+hydroflow-opt treats deterministic replay as best-effort. The selected
+execution backend is also recorded and restored automatically by `resume`.
 
 The initial implementation supports pygmo differential evolution and a
 fully-connected archipelago. Islands use pygmo multiprocessing and therefore
@@ -110,5 +158,5 @@ parameter names, bounds, and decoding; optimization settings are per run.
 Publish an entry point in the `hydroflow_opt.cases` group. Its plugin object exposes
 a `parameter_space(options)` method and a `worker_command(request, result)`
 method. The command receives JSON paths and must write one structured result.
-The worker protocol lets a future Slurm backend launch exactly the same case
-worker with scheduler-owned resources.
+The same worker command is used by local and Slurm execution; scheduler
+placement remains a responsibility of `hydroflow-opt`.
