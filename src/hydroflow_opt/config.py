@@ -5,7 +5,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hydroflow_opt.models import Candidate, ResourceRequest
+from hydroflow_opt.models import BackendKind, Candidate, ResourceRequest
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    """Selection of the mechanism used to launch case workers."""
+
+    backend: BackendKind = BackendKind.LOCAL
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,7 @@ class FlowOptConfig:
     case_options: dict[str, Any] = field(default_factory=dict)
     candidates: tuple[Candidate, ...] = ()
     resources: ResourceRequest = field(default_factory=ResourceRequest)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     optimization: OptimizationConfig | None = None
 
 
@@ -71,6 +79,7 @@ def load_config(path: str | Path) -> FlowOptConfig:
     run = _expect_table(raw, "run")
     case = _expect_table(raw, "case")
     resources = _expect_optional_table(raw, "resources")
+    execution = _expect_optional_table(raw, "execution")
     options = case.get("options", {})
     if not isinstance(options, dict):
         raise ValueError("'case.options' must be a TOML table")
@@ -97,8 +106,23 @@ def load_config(path: str | Path) -> FlowOptConfig:
                 resources, "threads_per_rank", 1
             ),
         ),
+        execution=_parse_execution(execution),
         optimization=_parse_optimization(raw.get("optimization")),
     )
+
+
+def _parse_execution(raw: dict[str, Any]) -> ExecutionConfig:
+    value = raw.get("backend", BackendKind.LOCAL.value)
+    if not isinstance(value, str):
+        raise ValueError("'execution.backend' must be a string")
+    try:
+        backend = BackendKind(value)
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in BackendKind)
+        raise ValueError(
+            f"'execution.backend' must be one of: {choices}"
+        ) from exc
+    return ExecutionConfig(backend=backend)
 
 
 def _parse_optimization(raw: Any) -> OptimizationConfig | None:

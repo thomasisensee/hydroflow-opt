@@ -19,6 +19,12 @@ Cases
 .. automodule:: hydroflow_opt.cases
     :members:
 
+Backends
+--------
+
+.. automodule:: hydroflow_opt.backends
+    :members:
+
 Runner
 ------
 
