@@ -13,7 +13,7 @@ case evaluations in isolated subprocesses.
 
 Cases are supplied by installed plugins. The package includes a deterministic
 `quadratic` case for laptop development and tests. A real case, such as
-`hydroflow-opt-hydrofoil`, depends on `hydroflow-opt` rather than the reverse.
+`hydrofoil-opt`, depends on `hydroflow-opt` rather than the reverse.
 
 ## Installation
 
