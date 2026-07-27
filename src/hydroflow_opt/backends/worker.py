@@ -51,6 +51,7 @@ class WorkerBackend(ABC):
                 "run_dir": str(self.config.run_dir),
                 "scratch_dir": str(scratch_dir),
                 "resources": asdict(self.config.resources),
+                "execution": self.execution_context(),
                 "optimization": asdict(context) if context else None,
             },
         }
@@ -112,6 +113,10 @@ class WorkerBackend(ABC):
     @abstractmethod
     def launch_command(self, worker_command: list[str]) -> list[str]:
         """Return the complete command used to launch one worker."""
+
+    @abstractmethod
+    def execution_context(self) -> dict[str, Any]:
+        """Return backend data consumed by scheduler-aware worker stages."""
 
     def execution_metadata(self, evaluation_dir: Path) -> dict[str, Any]:
         """Return backend metadata attached to the normalized result."""

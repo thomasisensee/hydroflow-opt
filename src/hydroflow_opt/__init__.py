@@ -19,6 +19,7 @@ from hydroflow_opt.models import (
     EvaluationStatus,
     ParameterSpace,
     ResourceRequest,
+    WorkerPlacement,
 )
 from hydroflow_opt.runner import (
     RunSummary,
@@ -49,6 +50,7 @@ __all__ = [
     "RunSummary",
     "SlurmBackend",
     "SubprocessBackend",
+    "WorkerPlacement",
     "case_from_name",
     "load_config",
     "run_local",

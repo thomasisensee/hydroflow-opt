@@ -28,6 +28,21 @@ class BackendKind(str, Enum):
     SLURM = "slurm"
 
 
+class WorkerPlacement(str, Enum):
+    """How a case worker uses scheduler resources.
+
+    BACKEND
+        The execution backend places the complete worker. This is suitable
+        for workers that do not launch scheduler-managed child stages.
+    CONTROLLER
+        The worker is a local controller. Scheduler-managed stages use the
+        launcher supplied in the worker request.
+    """
+
+    BACKEND = "backend"
+    CONTROLLER = "controller"
+
+
 @dataclass(frozen=True)
 class Candidate:
     """Input parameters for one workflow evaluation.
