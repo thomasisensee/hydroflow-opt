@@ -85,9 +85,10 @@ For example:
 
 ```bash
 #!/bin/bash
-#SBATCH --nodes=2
-#SBATCH --ntasks=4
-#SBATCH --cpus-per-task=2
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --cpus-per-task=1
+#SBATCH --hint=nomultithread
 
 hydroflow-opt optimize hydrofoil.toml
 ```
@@ -105,15 +106,22 @@ mpi_ranks = 2
 threads_per_rank = 1
 ```
 
-Each candidate is launched as one
+By default, each candidate is launched as one
 `srun --exclusive --nodes=1 --ntasks=1` step which reserves
-`mpi_ranks × threads_per_rank` CPUs. The allocation may span nodes, but one
-candidate must fit on one node. Partition, time limit, node count, and total
-allocation size remain properties of the outer Slurm job.
+`mpi_ranks × threads_per_rank` CPUs. Plugins with scheduler-aware internal
+stages can instead declare a controller worker. Such a worker runs exactly
+once and receives an MPI launcher in its JSON request. For example, a
+two-rank, one-thread stage receives:
 
-The worker runs exactly once and may use its reserved CPUs through an internal
-MPI launcher. Fully Slurm-native solver launching and multi-node candidates are
-not supported yet.
+```text
+srun --exclusive --nodes=1 --ntasks=2 --cpus-per-task=1 \
+  --cpu-bind=cores --mpi=pmix
+```
+
+This lets Slurm see the actual MPI rank topology instead of nesting
+`mpiexec -n 2` inside a one-task job step. The allocation may span nodes, but
+one candidate stage must fit on one node. Partition, time limit, node count,
+and total allocation size remain properties of the outer Slurm job.
 
 ## Optimize with islands
 
@@ -160,3 +168,9 @@ a `parameter_space(options)` method and a `worker_command(request, result)`
 method. The command receives JSON paths and must write one structured result.
 The same worker command is used by local and Slurm execution; scheduler
 placement remains a responsibility of `hydroflow-opt`.
+
+A plugin whose worker launches scheduler-aware stages may additionally expose
+`worker_placement()` returning `"controller"`. Its request then contains
+`context.execution.mpi_launcher`. The plugin must prepend that launcher to
+each MPI stage rather than starting another MPI runtime inside a backend-owned
+worker step.
