@@ -17,6 +17,7 @@ from hydroflow_opt import (
     ResourceRequest,
     SlurmBackend,
     SubprocessBackend,
+    WorkerPlacement,
     case_from_name,
     load_config,
     run_local,
@@ -35,6 +36,20 @@ class InMemoryBackend:
     def evaluate(self, candidate, context=None):
         objective = sum(value**2 for value in candidate.parameters.values())
         return EvaluationResult.success(candidate.id, objective)
+
+
+class ControllerCase:
+    """Case whose worker launches backend-provided scheduled stages."""
+
+    def parameter_space(self, options):
+        del options
+        return ParameterSpace(("x", "y"), (-5.0, -5.0), (5.0, 5.0))
+
+    def worker_command(self, request_path, result_path):
+        return ["controller-worker", str(request_path), str(result_path)]
+
+    def worker_placement(self):
+        return WorkerPlacement.CONTROLLER
 
 
 def write_config(
@@ -472,6 +487,68 @@ def test_slurm_wraps_one_worker_with_candidate_cpu_shape(
     assert (config.run_dir / "evaluations" / "a" / "stdout.log").read_text(
         encoding="utf-8"
     ) == "worker out"
+
+
+def test_slurm_controller_runs_once_and_receives_mpi_stage_launcher(
+    tmp_path, monkeypatch
+):
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            mpi_ranks=2,
+            threads_per_rank=3,
+        )
+    )
+    backend = SlurmBackend(config, ControllerCase())
+    commands = []
+    requests = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        request = json.loads(Path(command[-2]).read_text(encoding="utf-8"))
+        requests.append(request)
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "candidate_id": request["candidate"]["id"],
+                    "status": "success",
+                    "objective": 25.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("SLURM_JOB_ID", "456")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = backend.evaluate(config.candidates[0])
+
+    assert commands == [
+        [
+            "controller-worker",
+            str(config.run_dir / "evaluations" / "a" / "request.json"),
+            str(config.run_dir / "evaluations" / "a" / "result.json"),
+        ]
+    ]
+    assert requests[0]["context"]["execution"] == {
+        "backend": "slurm",
+        "mpi_launcher": [
+            "srun",
+            "--exclusive",
+            "--nodes=1",
+            "--ntasks=2",
+            "--cpus-per-task=3",
+            "--cpu-bind=cores",
+            "--mpi=pmix",
+        ],
+    }
+    assert result.objective == 25.0
+    assert result.metadata["slurm_job_id"] == "456"
 
 
 def test_slurm_cache_avoids_a_second_srun(tmp_path, monkeypatch):
