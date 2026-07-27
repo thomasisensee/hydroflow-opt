@@ -5,7 +5,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from hydroflow_opt.models import ParameterSpace
+from hydroflow_opt.models import ParameterSpace, WorkerPlacement
 
 
 class CasePlugin(Protocol):
@@ -20,6 +20,9 @@ class CasePlugin(Protocol):
         result_path: Path,
     ) -> list[str]:
         """Return the isolated worker command for one evaluation."""
+
+    def worker_placement(self) -> WorkerPlacement | str:
+        """Return whether the backend places the complete worker."""
 
 
 class QuadraticCase:
@@ -47,6 +50,25 @@ class QuadraticCase:
             str(request_path),
             str(result_path),
         ]
+
+    def worker_placement(self) -> WorkerPlacement:
+        """Place the complete scheduler-independent toy worker."""
+
+        return WorkerPlacement.BACKEND
+
+
+def case_worker_placement(case: CasePlugin) -> WorkerPlacement:
+    """Return a plugin's placement mode, defaulting older plugins safely."""
+
+    placement = getattr(case, "worker_placement", None)
+    if placement is None:
+        return WorkerPlacement.BACKEND
+    try:
+        return WorkerPlacement(placement())
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "case worker_placement() must return 'backend' or 'controller'"
+        ) from exc
 
 
 def case_from_name(name: str) -> CasePlugin:
