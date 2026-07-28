@@ -26,6 +26,8 @@ class OptimizationConfig:
     crossover_rate: float = 0.9
     topology: str = "fully_connected"
     seed: int | None = None
+    initial_population_file: str | None = None
+    migrant_handling: str = "preserve"
 
     def __post_init__(self) -> None:
         if (
@@ -47,6 +49,10 @@ class OptimizationConfig:
         if self.topology != "fully_connected":
             raise ValueError(
                 "only the 'fully_connected' topology is supported"
+            )
+        if self.migrant_handling not in {"preserve", "evict"}:
+            raise ValueError(
+                "optimization.migrant_handling must be 'preserve' or 'evict'"
             )
         if self.seed is not None and not 0 <= self.seed <= 0xFFFFFFFF:
             raise ValueError(
@@ -107,7 +113,7 @@ def load_config(path: str | Path) -> FlowOptConfig:
             ),
         ),
         execution=_parse_execution(execution),
-        optimization=_parse_optimization(raw.get("optimization")),
+        optimization=_parse_optimization(raw.get("optimization"), base_dir),
     )
 
 
@@ -125,7 +131,7 @@ def _parse_execution(raw: dict[str, Any]) -> ExecutionConfig:
     return ExecutionConfig(backend=backend)
 
 
-def _parse_optimization(raw: Any) -> OptimizationConfig | None:
+def _parse_optimization(raw: Any, base_dir: Path) -> OptimizationConfig | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -138,6 +144,10 @@ def _parse_optimization(raw: Any) -> OptimizationConfig | None:
         crossover_rate=float(raw.get("crossover_rate", 0.9)),
         topology=str(raw.get("topology", "fully_connected")),
         seed=_expect_optional_seed(raw),
+        initial_population_file=_expect_optional_population_path(
+            raw, base_dir
+        ),
+        migrant_handling=str(raw.get("migrant_handling", "preserve")),
     )
 
 
@@ -148,6 +158,19 @@ def _expect_optional_seed(raw: dict[str, Any]) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("'optimization.seed' must be an integer")
     return value
+
+
+def _expect_optional_population_path(
+    raw: dict[str, Any], base_dir: Path
+) -> str | None:
+    value = raw.get("initial_population_file")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            "'optimization.initial_population_file' must be a non-empty string"
+        )
+    return str(_resolve_path(base_dir, value).resolve())
 
 
 def _parse_candidates(raw: Any) -> list[Candidate]:

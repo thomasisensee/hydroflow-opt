@@ -109,8 +109,20 @@ def add_optimization(
     population_size: int = 5,
     generations: int = 1,
     seed: int | None = None,
+    initial_population_file: str | None = None,
+    migrant_handling: str | None = None,
 ) -> None:
     seed_line = "" if seed is None else f"seed = {seed}\n"
+    initial_population_line = (
+        ""
+        if initial_population_file is None
+        else f'initial_population_file = "{initial_population_file}"\n'
+    )
+    migrant_handling_line = (
+        ""
+        if migrant_handling is None
+        else f'migrant_handling = "{migrant_handling}"\n'
+    )
     with config_path.open("a", encoding="utf-8") as stream:
         stream.write(
             f"""
@@ -118,7 +130,7 @@ def add_optimization(
 islands = {islands}
 population_size = {population_size}
 generations = {generations}
-{seed_line}"""
+{seed_line}{initial_population_line}{migrant_handling_line}"""
         )
 
 
@@ -264,6 +276,76 @@ def test_omitted_seed_is_generated_and_recorded(tmp_path):
     seed = manifest["config"]["optimization"]["seed"]
     assert isinstance(seed, int)
     assert 0 <= seed <= 0xFFFFFFFF
+
+
+def test_optimization_can_seed_pre_evaluated_populations(tmp_path):
+    pytest.importorskip("pygmo")
+    initial_path = tmp_path / "initial.json"
+    initial_path.write_text(
+        json.dumps(
+            {
+                str(index): [[float(index), float(-index)], index * 2.0]
+                for index in range(-2, 4)
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = write_config(tmp_path)
+    add_optimization(
+        config_path,
+        seed=123,
+        initial_population_file=initial_path.name,
+        migrant_handling="evict",
+    )
+
+    config = load_config(config_path)
+    assert config.optimization is not None
+    assert config.optimization.initial_population_file == str(initial_path)
+    assert config.optimization.migrant_handling == "evict"
+    summary = run_optimization(config, backend=InMemoryBackend())
+
+    assert summary.total == 5
+    snapshot = tmp_path / "run" / "optimization" / "initial-population.json"
+    assert json.loads(snapshot.read_text(encoding="utf-8")) == json.loads(
+        initial_path.read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (tmp_path / "run" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["config"]["optimization"][
+        "initial_population_file"
+    ] == str(snapshot)
+    checkpoint = json.loads(
+        (tmp_path / "run" / "optimization" / "checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert all(
+        "-initial-" not in item for item in checkpoint["evaluation_ids"]
+    )
+    assert (
+        not (tmp_path / "run" / "evaluations")
+        .joinpath("island-000-initial-000")
+        .exists()
+    )
+
+
+def test_initial_population_rejects_too_few_records(tmp_path):
+    pytest.importorskip("pygmo")
+    initial_path = tmp_path / "initial.json"
+    initial_path.write_text(
+        json.dumps({"one": [[0.0, 0.0], 0.0]}),
+        encoding="utf-8",
+    )
+    config_path = write_config(tmp_path)
+    add_optimization(
+        config_path,
+        seed=123,
+        initial_population_file=initial_path.name,
+    )
+
+    with pytest.raises(ValueError, match="fewer records"):
+        run_optimization(load_config(config_path), backend=InMemoryBackend())
 
 
 def test_new_optimization_rejects_nonempty_run_directory(tmp_path):

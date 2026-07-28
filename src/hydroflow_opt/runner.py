@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+import math
 import os
 import platform
+import random
 import secrets
 import shutil
 import uuid
@@ -108,6 +110,7 @@ def run_optimization(
         config,
         optimization=replace(optimization, seed=seed),
     )
+    resolved = _snapshot_initial_population(resolved)
     case = case_from_name(resolved.case_name)
     space = case.parameter_space(resolved.case_options)
     manifest = _new_manifest(
@@ -309,6 +312,20 @@ def _initialize_populations(
 ) -> None:
     optimization = config.optimization
     assert optimization is not None and optimization.seed is not None
+    initial_population = (
+        _load_initial_population(
+            Path(optimization.initial_population_file),
+            case_from_name(config.case_name).parameter_space(
+                config.case_options
+            ),
+            optimization.population_size,
+        )
+        if (
+            optimization.initial_population_file is not None
+            and len(checkpoint["islands"]) < optimization.islands
+        )
+        else None
+    )
     for island in range(len(checkpoint["islands"]), optimization.islands):
         problem = pg.problem(
             _OptimizationProblem(
@@ -320,15 +337,23 @@ def _initialize_populations(
                 backend,
             )
         )
-        population = pg.population(
-            problem,
-            optimization.population_size,
-            seed=_derived_seed(optimization.seed, "population", island, 0),
-        )
+        if initial_population is None:
+            population = pg.population(
+                problem,
+                optimization.population_size,
+                seed=_derived_seed(optimization.seed, "population", island, 0),
+            )
+            checkpoint["evaluation_ids"].extend(
+                _initial_ids(island, optimization.population_size)
+            )
+        else:
+            population = pg.population(problem)
+            selected = random.Random(
+                _derived_seed(optimization.seed, "population", island, 0)
+            ).sample(initial_population, optimization.population_size)
+            for vector, fitness in selected:
+                population.push_back(vector, [fitness])
         checkpoint["islands"].append(_population_state(population, island, 0))
-        checkpoint["evaluation_ids"].extend(
-            _initial_ids(island, optimization.population_size)
-        )
         _save_checkpoint(config.run_dir, checkpoint)
         manifest["evaluation_ids"] = checkpoint["evaluation_ids"]
         _atomic_json(_manifest_path(config.run_dir), manifest)
@@ -345,6 +370,9 @@ def _build_archipelago(
     optimization = config.optimization
     assert optimization is not None and optimization.seed is not None
     archipelago = pg.archipelago(t=pg.fully_connected())
+    archipelago.set_migrant_handling(
+        getattr(pg.migrant_handling, optimization.migrant_handling)
+    )
     for island, state in enumerate(checkpoint["islands"]):
         problem = pg.problem(
             _OptimizationProblem(
@@ -377,6 +405,78 @@ def _build_archipelago(
             _deserialize_migrants(checkpoint["migrants_db"])
         )
     return archipelago
+
+
+def _load_initial_population(
+    path: Path,
+    space: Any,
+    population_size: int,
+) -> list[tuple[list[float], float]]:
+    """Load reusable ``identifier: [vector, objective]`` seed records."""
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read initial population file: {path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"initial population file is not valid JSON: {path}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ValueError("initial population file must contain a JSON object")
+
+    dimension = len(space.names)
+    records: list[tuple[list[float], float]] = []
+    for identifier, record in raw.items():
+        if (
+            not isinstance(record, list)
+            or len(record) != 2
+            or not isinstance(record[0], list)
+        ):
+            raise ValueError(
+                f"initial population record {identifier!r} must be "
+                "[vector, objective]"
+            )
+        try:
+            vector = [float(value) for value in record[0]]
+            objective = float(record[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"initial population record {identifier!r} is not numerical"
+            ) from exc
+        if len(vector) != dimension:
+            raise ValueError(
+                f"initial population record {identifier!r} has dimension "
+                f"{len(vector)}, expected {dimension}"
+            )
+        if not math.isfinite(objective) or not all(
+            math.isfinite(value) for value in vector
+        ):
+            raise ValueError(
+                f"initial population record {identifier!r} is not finite"
+            )
+        for value, lower, upper in zip(
+            vector,
+            space.lower_bounds,
+            space.upper_bounds,
+            strict=True,
+        ):
+            tolerance = 1.0e-7 * max(1.0, abs(lower), abs(upper))
+            if value < lower - tolerance or value > upper + tolerance:
+                raise ValueError(
+                    f"initial population record {identifier!r} is outside "
+                    "the parameter bounds"
+                )
+        records.append((vector, objective))
+
+    if len(records) < population_size:
+        raise ValueError(
+            "initial population file contains fewer records than "
+            "optimization.population_size"
+        )
+    return records
 
 
 def _population_state(population: Any, island: int, generation: int) -> dict:
@@ -446,6 +546,32 @@ def _prepare_new_optimization_run(
         )
     _prepare_run(config, config_path)
     (config.run_dir / "optimization").mkdir(parents=True, exist_ok=True)
+
+
+def _snapshot_initial_population(config: FlowOptConfig) -> FlowOptConfig:
+    """Copy seed data into the run so resume does not depend on its source."""
+
+    optimization = config.optimization
+    assert optimization is not None
+    if optimization.initial_population_file is None:
+        return config
+    source = Path(optimization.initial_population_file)
+    destination = (
+        config.run_dir / "optimization" / "initial-population.json"
+    ).resolve()
+    try:
+        shutil.copy2(source, destination)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot snapshot initial population file: {source}"
+        ) from exc
+    return replace(
+        config,
+        optimization=replace(
+            optimization,
+            initial_population_file=str(destination),
+        ),
+    )
 
 
 def _prepare_run(config: FlowOptConfig, config_path: Path | None) -> None:

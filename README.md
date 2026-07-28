@@ -120,8 +120,10 @@ srun --exclusive --nodes=1 --ntasks=2 --cpus-per-task=1 \
 
 This lets Slurm see the actual MPI rank topology instead of nesting
 `mpiexec -n 2` inside a one-task job step. The allocation may span nodes, but
-one candidate stage must fit on one node. Partition, time limit, node count,
-and total allocation size remain properties of the outer Slurm job.
+one candidate stage must fit on one node. Controller processes themselves
+originate on the batch node; only their scheduler-managed stages are placed
+across the allocation. Partition, time limit, node count, and total allocation
+size remain properties of the outer Slurm job.
 
 ## Optimize with islands
 
@@ -136,11 +138,27 @@ differential_weight = 0.8
 crossover_rate = 0.9
 topology = "fully_connected"
 seed = 12345 # optional; generated and recorded when omitted
+migrant_handling = "preserve" # or "evict"
 ```
 
 ```bash
 hydroflow-opt optimize path/to/config.toml
 ```
+
+By default, pygmo generates and evaluates each island's initial population.
+To reuse a database of pre-evaluated individuals, provide a JSON object whose
+values are `[parameter_vector, objective]` records:
+
+```toml
+[optimization]
+initial_population_file = "start_db.json"
+```
+
+Each island samples `population_size` records without replacement using its
+derived reproducible seed. Islands sample independently. Seed records are
+stored in the optimization checkpoint but are not counted as new evaluations.
+`migrant_handling` selects whether pygmo preserves or evicts migrants after
+delivery.
 
 Optimization runs write an atomic JSON checkpoint after initialization and
 after every generation. Resume an interrupted run using its stored effective
