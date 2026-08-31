@@ -23,12 +23,6 @@ from hydroflow_opt.backends import (
     backend_from_config,
     validate_execution_environment,
 )
-from hydroflow_opt.backends.worker import (
-    archive_attempt,
-    result_from_json,
-    result_to_json,
-    write_result,
-)
 from hydroflow_opt.cases import CasePlugin, case_from_name
 from hydroflow_opt.config import (
     ExecutionConfig,
@@ -43,6 +37,12 @@ from hydroflow_opt.models import (
     EvaluationResult,
     EvaluationStatus,
     ResourceRequest,
+)
+from hydroflow_opt.results import (
+    archive_attempt,
+    result_from_json,
+    result_to_json,
+    write_result,
 )
 
 _MANIFEST_SCHEMA = 2

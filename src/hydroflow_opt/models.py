@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol, Self
 
 
@@ -26,21 +27,6 @@ class BackendKind(str, Enum):
 
     LOCAL = "local"
     SLURM = "slurm"
-
-
-class WorkerPlacement(str, Enum):
-    """How a case worker uses scheduler resources.
-
-    BACKEND
-        The execution backend places the complete worker. This is suitable
-        for workers that do not launch scheduler-managed child stages.
-    CONTROLLER
-        The worker is a local controller. Scheduler-managed stages use the
-        launcher supplied in the worker request.
-    """
-
-    BACKEND = "backend"
-    CONTROLLER = "controller"
 
 
 @dataclass(frozen=True)
@@ -153,6 +139,71 @@ class ResourceRequest:
         """Maximum simultaneous CPU demand."""
 
         return self.concurrent_evaluations * self.cpus_per_evaluation
+
+
+@dataclass(frozen=True)
+class StageResources:
+    """Portable process and thread shape requested by one stage."""
+
+    processes: int = 1
+    threads_per_process: int = 1
+
+    def __post_init__(self) -> None:
+        if self.processes < 1 or self.threads_per_process < 1:
+            raise ValueError("stage resource counts must be at least one")
+
+    @property
+    def cpus(self) -> int:
+        """Return the maximum CPU count occupied by the stage."""
+
+        return self.processes * self.threads_per_process
+
+
+@dataclass(frozen=True)
+class EvaluationPaths:
+    """Core-owned paths available while constructing an evaluation plan."""
+
+    evaluation_dir: Path
+    scratch_dir: Path
+    request_path: Path
+    result_path: Path
+
+
+@dataclass(frozen=True)
+class EvaluationStage:
+    """One external command and its backend-neutral resource request."""
+
+    name: str
+    command: tuple[str, ...]
+    working_directory: Path
+    resources: StageResources = field(default_factory=StageResources)
+
+    def __post_init__(self) -> None:
+        if (
+            not self.name
+            or self.name in {".", ".."}
+            or "/" in self.name
+            or "\\" in self.name
+        ):
+            raise ValueError("stage name must be a safe path component")
+        if not self.command or any(not item for item in self.command):
+            raise ValueError("stage command must contain non-empty strings")
+
+
+@dataclass(frozen=True)
+class EvaluationPlan:
+    """Ordered stages that produce one structured evaluation result."""
+
+    stages: tuple[EvaluationStage, ...]
+
+    def __post_init__(self) -> None:
+        if not self.stages:
+            raise ValueError(
+                "an evaluation plan must contain at least one stage"
+            )
+        names = [stage.name for stage in self.stages]
+        if len(set(names)) != len(names):
+            raise ValueError("evaluation stage names must be unique")
 
 
 @dataclass(frozen=True)
