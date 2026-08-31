@@ -11,13 +11,15 @@ import hydroflow_opt.runner as runner
 from hydroflow_opt import (
     BackendKind,
     Candidate,
+    EvaluationPlan,
     EvaluationResult,
+    EvaluationStage,
     EvaluationStatus,
     ParameterSpace,
     ResourceRequest,
     SlurmBackend,
+    StageResources,
     SubprocessBackend,
-    WorkerPlacement,
     case_from_name,
     load_config,
     run_local,
@@ -38,18 +40,55 @@ class InMemoryBackend:
         return EvaluationResult.success(candidate.id, objective)
 
 
-class ControllerCase:
-    """Case whose worker launches backend-provided scheduled stages."""
+class TwoStageCase:
+    """Case exposing serial preparation and a parallel solver stage."""
 
     def parameter_space(self, options):
         del options
         return ParameterSpace(("x", "y"), (-5.0, -5.0), (5.0, 5.0))
 
-    def worker_command(self, request_path, result_path):
-        return ["controller-worker", str(request_path), str(result_path)]
+    def evaluation_plan(self, candidate, paths, resources):
+        del candidate, resources
+        return EvaluationPlan(
+            (
+                EvaluationStage(
+                    "prepare",
+                    ("prepare-command",),
+                    paths.evaluation_dir,
+                ),
+                EvaluationStage(
+                    "solve",
+                    ("solver-command", str(paths.result_path)),
+                    paths.evaluation_dir,
+                    StageResources(2, 3),
+                ),
+            )
+        )
 
-    def worker_placement(self):
-        return WorkerPlacement.CONTROLLER
+
+class FailingCase:
+    """Case proving that a failed stage prevents later commands."""
+
+    def parameter_space(self, options):
+        del options
+        return ParameterSpace(("x", "y"), (-5.0, -5.0), (5.0, 5.0))
+
+    def evaluation_plan(self, candidate, paths, resources):
+        del candidate, resources
+        return EvaluationPlan(
+            (
+                EvaluationStage(
+                    "prepare",
+                    ("failing-command",),
+                    paths.evaluation_dir,
+                ),
+                EvaluationStage(
+                    "solve",
+                    ("must-not-run", str(paths.result_path)),
+                    paths.evaluation_dir,
+                ),
+            )
+        )
 
 
 def write_config(
@@ -189,6 +228,19 @@ def test_run_local_writes_isolated_results(tmp_path):
     ]
     assert [record["objective"] for record in records] == [25.0, 5.0]
     assert (tmp_path / "run" / "evaluations" / "a" / "request.json").exists()
+    stage_dir = (
+        tmp_path / "run" / "evaluations" / "a" / "stages" / "01-evaluate"
+    )
+    assert (stage_dir / "stdout.log").exists()
+    assert (stage_dir / "stderr.log").exists()
+    metadata = json.loads(
+        (stage_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["resources"] == {
+        "processes": 1,
+        "threads_per_process": 1,
+    }
+    assert records[0]["timings"]["evaluate"] >= 0.0
     assert inspect_run(tmp_path / "run") == summary
 
 
@@ -475,6 +527,55 @@ def test_subprocess_backend_archives_mismatched_unfinished_attempt(tmp_path):
     attempt = tmp_path / "run" / "evaluations" / "a" / "attempts"
     assert (attempt / "attempt-0001" / "request.json").exists()
     assert (attempt / "attempt-0001" / "result.json").exists()
+    assert (attempt / "attempt-0001" / "stages").is_dir()
+
+
+def test_failed_stage_stops_plan_and_records_diagnostics(
+    tmp_path, monkeypatch
+):
+    config = load_config(write_config(tmp_path))
+    backend = SubprocessBackend(config, FailingCase())
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 7, "partial", "boom")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = backend.evaluate(config.candidates[0])
+
+    assert commands == [["failing-command"]]
+    assert result.status is EvaluationStatus.FAILED
+    assert result.error == "stage 'prepare' exited with status 7"
+    assert result.metadata["failed_stage"] == "prepare"
+    stage_dir = config.run_dir / "evaluations" / "a" / "stages" / "01-prepare"
+    assert (stage_dir / "stdout.log").read_text(encoding="utf-8") == "partial"
+    assert (stage_dir / "stderr.log").read_text(encoding="utf-8") == "boom"
+
+
+def test_local_backend_uses_mpiexec_for_multi_process_stage(tmp_path):
+    config = load_config(
+        write_config(tmp_path, mpi_ranks=2, threads_per_rank=3)
+    )
+    backend = SubprocessBackend(config, TwoStageCase())
+    stage = (
+        TwoStageCase()
+        .evaluation_plan(
+            config.candidates[0],
+            backend._evaluation_paths(config.candidates[0]),
+            config.resources,
+        )
+        .stages[1]
+    )
+
+    assert backend.launch_command(stage) == [
+        "mpiexec",
+        "-n",
+        "2",
+        "solver-command",
+        str(config.run_dir / "evaluations" / "a" / "result.json"),
+    ]
 
 
 def test_builtin_backends_are_pickle_safe(tmp_path):
@@ -512,9 +613,7 @@ def test_slurm_requires_srun_before_creating_run(tmp_path, monkeypatch):
     assert not config.run_dir.exists()
 
 
-def test_slurm_wraps_one_worker_with_candidate_cpu_shape(
-    tmp_path, monkeypatch
-):
+def test_slurm_launches_quadratic_as_a_serial_stage(tmp_path, monkeypatch):
     config = load_config(
         write_config(
             tmp_path,
@@ -557,21 +656,32 @@ def test_slurm_wraps_one_worker_with_candidate_cpu_shape(
             "--exclusive",
             "--nodes=1",
             "--ntasks=1",
-            "--cpus-per-task=6",
-            *case_from_name("quadratic").worker_command(
-                config.run_dir / "evaluations" / "a" / "request.json",
-                config.run_dir / "evaluations" / "a" / "result.json",
-            ),
+            "--cpus-per-task=1",
+            "--cpu-bind=cores",
+            *case_from_name("quadratic")
+            .evaluation_plan(
+                candidate,
+                backend._evaluation_paths(candidate),
+                config.resources,
+            )
+            .stages[0]
+            .command,
         ]
     ]
     assert result.objective == 25.0
     assert result.metadata["slurm_job_id"] == "456"
-    assert (config.run_dir / "evaluations" / "a" / "stdout.log").read_text(
-        encoding="utf-8"
-    ) == "worker out"
+    stdout = (
+        config.run_dir
+        / "evaluations"
+        / "a"
+        / "stages"
+        / "01-evaluate"
+        / "stdout.log"
+    )
+    assert stdout.read_text(encoding="utf-8") == "worker out"
 
 
-def test_slurm_controller_runs_once_and_receives_mpi_stage_launcher(
+def test_slurm_launches_each_stage_with_its_resource_shape(
     tmp_path, monkeypatch
 ):
     config = load_config(
@@ -582,15 +692,18 @@ def test_slurm_controller_runs_once_and_receives_mpi_stage_launcher(
             threads_per_rank=3,
         )
     )
-    backend = SlurmBackend(config, ControllerCase())
+    backend = SlurmBackend(config, TwoStageCase())
     commands = []
-    requests = []
 
     def fake_run(command, **kwargs):
         commands.append(command)
-        request = json.loads(Path(command[-2]).read_text(encoding="utf-8"))
-        requests.append(request)
-        Path(command[-1]).write_text(
+        if "solver-command" not in command:
+            return subprocess.CompletedProcess(command, 0, "prepared", "")
+        result_path = Path(command[-1])
+        request = json.loads(
+            (result_path.parent / "request.json").read_text(encoding="utf-8")
+        )
+        result_path.write_text(
             json.dumps(
                 {
                     "candidate_id": request["candidate"]["id"],
@@ -612,14 +725,15 @@ def test_slurm_controller_runs_once_and_receives_mpi_stage_launcher(
 
     assert commands == [
         [
-            "controller-worker",
-            str(config.run_dir / "evaluations" / "a" / "request.json"),
-            str(config.run_dir / "evaluations" / "a" / "result.json"),
-        ]
-    ]
-    assert requests[0]["context"]["execution"] == {
-        "backend": "slurm",
-        "mpi_launcher": [
+            "srun",
+            "--exclusive",
+            "--nodes=1",
+            "--ntasks=1",
+            "--cpus-per-task=1",
+            "--cpu-bind=cores",
+            "prepare-command",
+        ],
+        [
             "srun",
             "--exclusive",
             "--nodes=1",
@@ -627,8 +741,10 @@ def test_slurm_controller_runs_once_and_receives_mpi_stage_launcher(
             "--cpus-per-task=3",
             "--cpu-bind=cores",
             "--mpi=pmix",
+            "solver-command",
+            str(config.run_dir / "evaluations" / "a" / "result.json"),
         ],
-    }
+    ]
     assert result.objective == 25.0
     assert result.metadata["slurm_job_id"] == "456"
 

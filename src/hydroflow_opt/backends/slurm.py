@@ -1,19 +1,16 @@
 """Slurm job-step execution within an existing allocation."""
 
-from __future__ import annotations
-
 import os
 import shutil
 from pathlib import Path
 from typing import Any
 
-from hydroflow_opt.backends.worker import WorkerBackend
-from hydroflow_opt.cases import case_worker_placement
-from hydroflow_opt.models import WorkerPlacement
+from hydroflow_opt.backends.staged import StagedBackend
+from hydroflow_opt.models import EvaluationStage
 
 
-class SlurmBackend(WorkerBackend):
-    """Place complete workers or their scheduler-aware stages with Slurm."""
+class SlurmBackend(StagedBackend):
+    """Place every evaluation stage in an explicit Slurm job step."""
 
     @staticmethod
     def validate_environment() -> None:
@@ -29,38 +26,22 @@ class SlurmBackend(WorkerBackend):
                 "Slurm execution requires the 'srun' executable on PATH"
             )
 
-    def launch_command(self, worker_command: list[str]) -> list[str]:
-        """Place a complete worker unless it controls scheduled stages."""
+    def launch_command(self, stage: EvaluationStage) -> list[str]:
+        """Translate a portable stage into an exclusive one-node job step."""
 
         self.validate_environment()
-        if case_worker_placement(self.case) is WorkerPlacement.CONTROLLER:
-            return worker_command
-        cpus = self.config.resources.cpus_per_evaluation
-        return [
+        resources = stage.resources
+        command = [
             "srun",
             "--exclusive",
             "--nodes=1",
-            "--ntasks=1",
-            f"--cpus-per-task={cpus}",
-            *worker_command,
+            f"--ntasks={resources.processes}",
+            f"--cpus-per-task={resources.threads_per_process}",
+            "--cpu-bind=cores",
         ]
-
-    def execution_context(self) -> dict[str, Any]:
-        """Supply a one-node Slurm launcher for an MPI worker stage."""
-
-        resources = self.config.resources
-        return {
-            "backend": "slurm",
-            "mpi_launcher": [
-                "srun",
-                "--exclusive",
-                "--nodes=1",
-                f"--ntasks={resources.mpi_ranks}",
-                f"--cpus-per-task={resources.threads_per_rank}",
-                "--cpu-bind=cores",
-                "--mpi=pmix",
-            ],
-        }
+        if resources.processes > 1:
+            command.append("--mpi=pmix")
+        return [*command, *stage.command]
 
     def execution_metadata(self, evaluation_dir: Path) -> dict[str, Any]:
         """Record the allocation that executed the worker."""
