@@ -1,38 +1,81 @@
-User API
-========
+API reference
+=============
 
-Core models
------------
+Only the public orchestration contracts are listed here. Case-specific runtime functions belong to their plugin documentation.
 
-.. automodule:: hydroflow_opt.models
-    :members:
+Models
+------
+
+.. autoclass:: hydroflow_opt.Candidate
+   :members:
+
+.. autoclass:: hydroflow_opt.ParameterSpace
+   :members:
+
+.. autoclass:: hydroflow_opt.ResourceRequest
+   :members:
+
+.. autoclass:: hydroflow_opt.StageResources
+   :members:
+
+.. autoclass:: hydroflow_opt.EvaluationPaths
+   :members:
+
+.. autoclass:: hydroflow_opt.EvaluationStage
+   :members:
+
+.. autoclass:: hydroflow_opt.EvaluationPlan
+   :members:
+
+.. autoclass:: hydroflow_opt.EvaluationResult
+   :members:
+
+.. autoclass:: hydroflow_opt.EvaluationStatus
+   :members:
+
+Plugin contract
+---------------
+
+.. autoclass:: hydroflow_opt.CasePlugin
+   :members:
+
+.. autofunction:: hydroflow_opt.case_from_name
+
+.. autofunction:: hydroflow_opt.results.write_result
 
 Configuration
 -------------
 
-.. automodule:: hydroflow_opt.config
-    :members:
+.. autoclass:: hydroflow_opt.FlowOptConfig
+   :members:
 
-Cases
------
+.. autoclass:: hydroflow_opt.ExecutionConfig
+   :members:
 
-.. automodule:: hydroflow_opt.cases
-    :members:
+.. autoclass:: hydroflow_opt.OptimizationConfig
+   :members:
 
-Backends
---------
+.. autofunction:: hydroflow_opt.load_config
 
-.. automodule:: hydroflow_opt.backends
-    :members:
+Execution
+---------
 
-Runner
-------
+.. autoclass:: hydroflow_opt.SubprocessBackend
+   :members:
 
-.. automodule:: hydroflow_opt.runner
-    :members:
+.. autoclass:: hydroflow_opt.SlurmBackend
+   :members:
 
-CLI
----
+Runs
+----
 
-.. automodule:: hydroflow_opt.cli
-    :members:
+.. autoclass:: hydroflow_opt.RunSummary
+   :members:
+
+.. autofunction:: hydroflow_opt.run_local
+
+.. autofunction:: hydroflow_opt.run_optimization
+
+.. autofunction:: hydroflow_opt.resume_optimization
+
+.. autofunction:: hydroflow_opt.runner.inspect_run

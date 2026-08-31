@@ -11,6 +11,8 @@
 
 Cases are supplied by installed plugins. The package includes a deterministic `quadratic` case for laptop development and tests. A real case, such as `hydrofoil-opt`, depends on `hydroflow-opt` rather than the reverse.
 
+The [documentation](doc/index.md) explains the execution model, optimization, configuration, output files, and case-plugin contract.
+
 ## Installation
 
 Install with uv or pip on a supported Linux system:
@@ -103,7 +105,7 @@ srun --exclusive --nodes=1 --ntasks=2 --cpus-per-task=1 \
   --cpu-bind=cores --mpi=pmix
 ```
 
-This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node Because successive stages may run on different nodes, their scratch directory must be visible from every allocated node. Partition, time limit, node count, and total allocation size remain properties of the outer Slurm job.
+This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node. Because successive stages may run on different nodes, their scratch directory must be visible from every allocated node. Partition, time limit, node count, and total allocation size remain properties of the outer Slurm job.
 
 ## Optimize with islands
 
