@@ -15,7 +15,6 @@ from hydroflow_opt.runner import (
 
 def main(argv: list[str] | None = None) -> int:
     """Run the ``hydroflow-opt`` command line interface."""
-
     parser = argparse.ArgumentParser(prog="hydroflow-opt")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("check", "run", "optimize"):

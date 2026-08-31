@@ -30,6 +30,7 @@ class OptimizationConfig:
     migrant_handling: str = "preserve"
 
     def __post_init__(self) -> None:
+        """Validate differential-evolution settings."""
         if (
             self.islands < 1
             or self.population_size < 1
@@ -76,7 +77,6 @@ class FlowOptConfig:
 
 def load_config(path: str | Path) -> FlowOptConfig:
     """Load and validate a ``hydroflow-opt`` TOML configuration."""
-
     config_path = Path(path).resolve()
     with config_path.open("rb") as stream:
         raw = tomllib.load(stream)

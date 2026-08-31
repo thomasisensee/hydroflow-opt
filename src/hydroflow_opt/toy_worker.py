@@ -7,7 +7,6 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     """Evaluate a request written by :class:`SubprocessBackend`."""
-
     args = argv if argv is not None else sys.argv[1:]
     if len(args) != 2:
         raise SystemExit(

@@ -9,7 +9,6 @@ class SubprocessBackend(StagedBackend):
 
     def launch_command(self, stage: EvaluationStage) -> list[str]:
         """Translate a stage into a direct or MPI-launched command."""
-
         command = list(stage.command)
         if stage.resources.processes == 1:
             return command

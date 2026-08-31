@@ -55,11 +55,11 @@ __all__ = [
     "ResourceRequest",
     "RunSummary",
     "SlurmBackend",
-    "SubprocessBackend",
     "StageResources",
+    "SubprocessBackend",
     "case_from_name",
     "load_config",
+    "resume_optimization",
     "run_local",
     "run_optimization",
-    "resume_optimization",
 ]
