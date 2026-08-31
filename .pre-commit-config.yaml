@@ -12,19 +12,31 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # Make sure that contained YAML files are well-formed
-      - id: check-yaml
-      # Trim trailing whitespace of all sorts
-      - id: trailing-whitespace
-      # Apply a file size limit of 500kB
-      - id: check-added-large-files
-      # Simple parser validation of e.g. pyproject.toml
-      - id: check-toml
       # Unify file endings
       - id: end-of-file-fixer
+      # Apply a file size limit of 500kB
+      - id: check-added-large-files
+      # Check json files for syntax errors
+      - id: check-json
+      # Simple parser validation of e.g. pyproject.toml
+      - id: check-toml
+      # Make sure that contained YAML files are well-formed
+      - id: check-yaml
+      # Ensure consistent line endings
+      - id: mixed-line-ending
+      # Sort lines in requirements files
+      - id: requirements-txt-fixer
+      # Trim trailing whitespace of all sorts
+      - id: trailing-whitespace
 
   # GitHub Actions Workflow linter
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:
       - id: actionlint
+
+  # Validate citation metadata file
+  - repo: https://github.com/citation-file-format/cffconvert
+    rev: 054bda51dbe278b3e86f27c890e3f3ac877d616c
+    hooks:
+      - id: validate-cff
