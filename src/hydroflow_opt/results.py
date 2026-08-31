@@ -20,7 +20,6 @@ def result_from_json(
     extra_metadata: dict[str, Any] | None = None,
 ) -> EvaluationResult:
     """Validate and normalize a case-produced result."""
-
     if raw.get("candidate_id") != candidate_id:
         raise ValueError("case result candidate_id does not match request")
     metadata_value = raw.get("metadata", {})
@@ -56,7 +55,6 @@ def result_from_json(
 
 def write_result(path: Path, result: EvaluationResult) -> None:
     """Atomically write a normalized terminal result."""
-
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(
         json.dumps(result_to_json(result), indent=2) + "\n",
@@ -67,7 +65,6 @@ def write_result(path: Path, result: EvaluationResult) -> None:
 
 def result_to_json(result: EvaluationResult) -> dict[str, object]:
     """Convert an evaluation result to its JSON representation."""
-
     return {
         "candidate_id": result.candidate_id,
         "status": result.status.value,
@@ -80,7 +77,6 @@ def result_to_json(result: EvaluationResult) -> dict[str, object]:
 
 def archive_attempt(evaluation_dir: Path) -> None:
     """Move files belonging to a stale evaluation attempt aside."""
-
     attempts_dir = evaluation_dir / "attempts"
     attempts_dir.mkdir(exist_ok=True)
     number = len([path for path in attempts_dir.iterdir() if path.is_dir()])

@@ -69,7 +69,6 @@ def run_local(
     backend: EvaluationBackend | None = None,
 ) -> RunSummary:
     """Evaluate explicit candidates with the configured isolated worker."""
-
     if not config.candidates:
         raise ValueError("'run' requires at least one [[candidate]] entry")
     case = case_from_name(config.case_name)
@@ -93,7 +92,6 @@ def run_optimization(
     backend: EvaluationBackend | None = None,
 ) -> RunSummary:
     """Start a new resumable pygmo DE optimization."""
-
     _validate_optimization(config)
     if backend is None:
         validate_execution_environment(config)
@@ -126,7 +124,6 @@ def resume_optimization(
     backend: EvaluationBackend | None = None,
 ) -> RunSummary:
     """Continue a compatible optimization from its latest checkpoint."""
-
     run_path = Path(run_dir).resolve()
     manifest = _read_json(_manifest_path(run_path))
     if manifest.get("schema_version") not in _SUPPORTED_MANIFEST_SCHEMAS:
@@ -223,7 +220,6 @@ class _OptimizationProblem:
 
 def inspect_run(run_dir: str | Path) -> RunSummary:
     """Read a completed run summary from disk."""
-
     summary_path = Path(run_dir) / "summary.json"
     raw = json.loads(summary_path.read_text(encoding="utf-8"))
     return RunSummary(
@@ -413,7 +409,6 @@ def _load_initial_population(
     population_size: int,
 ) -> list[tuple[list[float], float]]:
     """Load reusable ``identifier: [vector, objective]`` seed records."""
-
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -550,7 +545,6 @@ def _prepare_new_optimization_run(
 
 def _snapshot_initial_population(config: FlowOptConfig) -> FlowOptConfig:
     """Copy seed data into the run so resume does not depend on its source."""
-
     optimization = config.optimization
     assert optimization is not None
     if optimization.initial_population_file is None:
