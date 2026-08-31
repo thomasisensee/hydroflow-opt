@@ -1,7 +1,5 @@
 """Built-in worker execution backends."""
 
-from __future__ import annotations
-
 from hydroflow_opt.backends.local import SubprocessBackend
 from hydroflow_opt.backends.slurm import SlurmBackend
 from hydroflow_opt.cases import CasePlugin

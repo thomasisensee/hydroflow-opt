@@ -1,24 +1,21 @@
-"""Direct local subprocess execution."""
+"""Direct local stage execution."""
 
-from typing import Any
+from hydroflow_opt.backends.staged import StagedBackend
+from hydroflow_opt.models import EvaluationStage
 
-from hydroflow_opt.backends.worker import WorkerBackend
 
+class SubprocessBackend(StagedBackend):
+    """Run case stages directly or through a local MPI launcher."""
 
-class SubprocessBackend(WorkerBackend):
-    """Run isolated case workers as local subprocesses."""
+    def launch_command(self, stage: EvaluationStage) -> list[str]:
+        """Translate a stage into a direct or MPI-launched command."""
 
-    def launch_command(self, worker_command: list[str]) -> list[str]:
-        """Launch the case worker without a scheduler wrapper."""
-
-        return worker_command
-
-    def execution_context(self) -> dict[str, Any]:
-        """Use the local MPI launcher for parallel worker stages."""
-
-        ranks = self.config.resources.mpi_ranks
-        launcher = ["mpiexec", "-n", str(ranks)] if ranks > 1 else []
-        return {
-            "backend": "local",
-            "mpi_launcher": launcher,
-        }
+        command = list(stage.command)
+        if stage.resources.processes == 1:
+            return command
+        return [
+            "mpiexec",
+            "-n",
+            str(stage.resources.processes),
+            *command,
+        ]

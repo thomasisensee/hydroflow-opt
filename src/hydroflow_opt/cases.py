@@ -1,11 +1,17 @@
-"""Case discovery and the subprocess-worker case contract."""
+"""Case discovery and the staged-evaluation case contract."""
 
 import sys
 from importlib import metadata
-from pathlib import Path
 from typing import Any, Protocol, cast
 
-from hydroflow_opt.models import ParameterSpace, WorkerPlacement
+from hydroflow_opt.models import (
+    Candidate,
+    EvaluationPaths,
+    EvaluationPlan,
+    EvaluationStage,
+    ParameterSpace,
+    ResourceRequest,
+)
 
 
 class CasePlugin(Protocol):
@@ -14,15 +20,13 @@ class CasePlugin(Protocol):
     def parameter_space(self, options: dict[str, Any]) -> ParameterSpace:
         """Return the named numerical space optimized by pygmo."""
 
-    def worker_command(
+    def evaluation_plan(
         self,
-        request_path: Path,
-        result_path: Path,
-    ) -> list[str]:
-        """Return the isolated worker command for one evaluation."""
-
-    def worker_placement(self) -> WorkerPlacement | str:
-        """Return whether the backend places the complete worker."""
+        candidate: Candidate,
+        paths: EvaluationPaths,
+        resources: ResourceRequest,
+    ) -> EvaluationPlan:
+        """Return ordered, backend-neutral commands for one evaluation."""
 
 
 class QuadraticCase:
@@ -38,37 +42,28 @@ class QuadraticCase:
             upper_bounds=tuple(5.0 for _ in names),
         )
 
-    def worker_command(
+    def evaluation_plan(
         self,
-        request_path: Path,
-        result_path: Path,
-    ) -> list[str]:
-        return [
-            sys.executable,
-            "-m",
-            "hydroflow_opt.toy_worker",
-            str(request_path),
-            str(result_path),
-        ]
-
-    def worker_placement(self) -> WorkerPlacement:
-        """Place the complete scheduler-independent toy worker."""
-
-        return WorkerPlacement.BACKEND
-
-
-def case_worker_placement(case: CasePlugin) -> WorkerPlacement:
-    """Return a plugin's placement mode, defaulting older plugins safely."""
-
-    placement = getattr(case, "worker_placement", None)
-    if placement is None:
-        return WorkerPlacement.BACKEND
-    try:
-        return WorkerPlacement(placement())
-    except (TypeError, ValueError) as exc:
-        raise TypeError(
-            "case worker_placement() must return 'backend' or 'controller'"
-        ) from exc
+        candidate: Candidate,
+        paths: EvaluationPaths,
+        resources: ResourceRequest,
+    ) -> EvaluationPlan:
+        del candidate, resources
+        return EvaluationPlan(
+            stages=(
+                EvaluationStage(
+                    name="evaluate",
+                    command=(
+                        sys.executable,
+                        "-m",
+                        "hydroflow_opt.toy_worker",
+                        str(paths.request_path),
+                        str(paths.result_path),
+                    ),
+                    working_directory=paths.evaluation_dir,
+                ),
+            )
+        )
 
 
 def case_from_name(name: str) -> CasePlugin:
@@ -89,7 +84,7 @@ def case_from_name(name: str) -> CasePlugin:
         else:
             plugin = loaded
         if not hasattr(plugin, "parameter_space") or not hasattr(
-            plugin, "worker_command"
+            plugin, "evaluation_plan"
         ):
             raise TypeError(
                 f"case plugin '{name}' does not implement the case contract"
