@@ -33,6 +33,7 @@ class QuadraticCase:
     """Portable built-in case used by examples and tests."""
 
     def parameter_space(self, options: dict[str, Any]) -> ParameterSpace:
+        """Return configurable names with fixed quadratic bounds."""
         names = tuple(
             str(name) for name in options.get("parameters", ("x", "y"))
         )
@@ -48,6 +49,7 @@ class QuadraticCase:
         paths: EvaluationPaths,
         resources: ResourceRequest,
     ) -> EvaluationPlan:
+        """Return the single-stage quadratic evaluation plan."""
         del candidate, resources
         return EvaluationPlan(
             stages=(
@@ -68,7 +70,6 @@ class QuadraticCase:
 
 def case_from_name(name: str) -> CasePlugin:
     """Load a built-in case or a case registered by an installed package."""
-
     if name == "quadratic":
         return QuadraticCase()
 
@@ -77,9 +78,9 @@ def case_from_name(name: str) -> CasePlugin:
         if entry.name != name:
             continue
         loaded = entry.load()
-        if isinstance(loaded, type):
-            plugin = loaded()
-        elif callable(loaded) and not hasattr(loaded, "parameter_space"):
+        if isinstance(loaded, type) or (
+            callable(loaded) and not hasattr(loaded, "parameter_space")
+        ):
             plugin = loaded()
         else:
             plugin = loaded

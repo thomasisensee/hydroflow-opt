@@ -40,6 +40,7 @@ class StagedBackend(ABC):
     """Evaluate candidates as ordered commands supplied by a case plugin."""
 
     def __init__(self, config: FlowOptConfig, case: CasePlugin) -> None:
+        """Initialize the backend for one configuration and case."""
         self.config = config
         self.case = case
 
@@ -49,7 +50,6 @@ class StagedBackend(ABC):
         context: EvaluationContext | None = None,
     ) -> EvaluationResult:
         """Execute a case plan and normalize its terminal result."""
-
         paths = self._evaluation_paths(candidate)
         paths.evaluation_dir.mkdir(parents=True, exist_ok=True)
         paths.scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -118,7 +118,6 @@ class StagedBackend(ABC):
 
     def execution_metadata(self, evaluation_dir: Path) -> dict[str, Any]:
         """Return backend metadata attached to the normalized result."""
-
         return {
             "evaluation_dir": str(evaluation_dir),
             "stages_directory": str(evaluation_dir / "stages"),
