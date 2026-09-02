@@ -99,8 +99,11 @@ def write_config(
     threads_per_rank=1,
     name="run",
     backend=None,
+    scratch_directory=None,
 ):
     config_path = tmp_path / f"{name}.toml"
+    if scratch_directory is None:
+        scratch_directory = f"{name}-scratch"
     execution = (
         ""
         if backend is None
@@ -112,7 +115,7 @@ backend = "{backend}"
     config_path.write_text(
         f"""[run]
 directory = "{name}"
-scratch_directory = "{name}-scratch"
+scratch_directory = "{scratch_directory}"
 
 [case]
 name = "quadratic"
@@ -207,6 +210,54 @@ def test_load_config(tmp_path):
     assert [candidate.id for candidate in config.candidates] == ["a", "b"]
 
 
+def test_scratch_directory_expands_environment_variables(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HYDROFLOW_TEST_ROOT", "relative-scratch")
+    monkeypatch.setenv("HYDROFLOW_TEST_USER", "tester")
+    config = load_config(
+        write_config(
+            tmp_path,
+            scratch_directory=(
+                "$HYDROFLOW_TEST_ROOT/${HYDROFLOW_TEST_USER}/$$cases"
+            ),
+        )
+    )
+
+    assert config.scratch_dir == (
+        tmp_path / "relative-scratch" / "tester" / "$cases"
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["${BROKEN", "$9INVALID", "${NAME:-fallback}", "$(pwd)"]
+)
+def test_scratch_directory_rejects_invalid_templates(tmp_path, value):
+    config_path = write_config(tmp_path, scratch_directory=value)
+
+    with pytest.raises(ValueError, match="invalid environment variable"):
+        load_config(config_path, resolve_scratch=False)
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_run_requires_nonempty_scratch_environment_variables(
+    tmp_path, monkeypatch, value
+):
+    config_path = write_config(
+        tmp_path,
+        scratch_directory="${HYDROFLOW_MISSING_ROOT}/cases",
+    )
+    if value is None:
+        monkeypatch.delenv("HYDROFLOW_MISSING_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("HYDROFLOW_MISSING_ROOT", value)
+
+    assert main(["check", str(config_path)]) == 0
+    with pytest.raises(ValueError, match="HYDROFLOW_MISSING_ROOT"):
+        main(["run", str(config_path)])
+    assert not (tmp_path / "run").exists()
+
+
 def test_load_config_selects_slurm_and_rejects_unknown_backend(tmp_path):
     config = load_config(write_config(tmp_path, backend="slurm"))
     assert config.execution.backend is BackendKind.SLURM
@@ -242,6 +293,29 @@ def test_run_local_writes_isolated_results(tmp_path):
     }
     assert records[0]["timings"]["evaluate"] >= 0.0
     assert inspect_run(tmp_path / "run") == summary
+
+
+def test_run_uses_expanded_scratch_and_persistent_output(
+    tmp_path, monkeypatch
+):
+    scratch_root = tmp_path / "node-local"
+    monkeypatch.setenv("TMPDIR", str(scratch_root))
+    config_path = write_config(
+        tmp_path, scratch_directory="${TMPDIR}/hydroflow-opt"
+    )
+
+    summary = run_local(load_config(config_path), config_path=config_path)
+
+    request = json.loads(
+        (tmp_path / "run" / "evaluations" / "a" / "request.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert request["context"]["scratch_dir"] == str(
+        scratch_root / "hydroflow-opt" / "a"
+    )
+    assert summary.results_path == tmp_path / "run" / "results.jsonl"
+    assert summary.results_path.exists()
 
 
 def test_cli_check_run_and_inspect(tmp_path, capsys):
@@ -613,6 +687,66 @@ def test_slurm_requires_srun_before_creating_run(tmp_path, monkeypatch):
     assert not config.run_dir.exists()
 
 
+def test_slurm_allows_tmpdir_scratch_on_one_node(tmp_path, monkeypatch):
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "local-tmp"))
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            scratch_directory="$TMPDIR/hydroflow-opt",
+        )
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.delenv("SLURM_JOB_NUM_NODES", raising=False)
+    monkeypatch.setenv("SLURM_NNODES", "1")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+
+    SlurmBackend.validate_environment(config)
+
+
+@pytest.mark.parametrize(
+    ("nodes", "message"),
+    [(None, "exactly one"), ("many", "valid"), ("2", "exactly one")],
+)
+def test_slurm_rejects_unsafe_tmpdir_allocations_before_creating_run(
+    tmp_path, monkeypatch, nodes, message
+):
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "local-tmp"))
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            scratch_directory="${TMPDIR}/hydroflow-opt",
+        )
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.delenv("SLURM_NNODES", raising=False)
+    if nodes is None:
+        monkeypatch.delenv("SLURM_JOB_NUM_NODES", raising=False)
+    else:
+        monkeypatch.setenv("SLURM_JOB_NUM_NODES", nodes)
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        run_local(config)
+    assert not config.run_dir.exists()
+
+
+def test_slurm_allows_shared_scratch_on_multiple_nodes(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setenv("SLURM_JOB_NUM_NODES", "2")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+
+    SlurmBackend.validate_environment(config)
+
+
 def test_slurm_launches_quadratic_as_a_serial_stage(tmp_path, monkeypatch):
     config = load_config(
         write_config(
@@ -814,7 +948,7 @@ def test_slurm_cli_run_uses_configured_backend(tmp_path, monkeypatch):
     assert all(command[0] == "srun" for command in commands)
 
 
-def test_manifest_records_execution_and_schema_one_defaults_local(tmp_path):
+def test_manifest_records_runtime_scratch(tmp_path):
     pytest.importorskip("pygmo")
     config_path = write_config(tmp_path, backend="slurm")
     add_optimization(config_path, seed=17)
@@ -825,21 +959,83 @@ def test_manifest_records_execution_and_schema_one_defaults_local(tmp_path):
     manifest_path = tmp_path / "run" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 1
     assert manifest["config"]["execution"] == {"backend": "slurm"}
+    assert manifest["config"]["scratch_directory"] == {
+        "template": "run-scratch",
+        "base_directory": str(tmp_path),
+    }
+    assert manifest["provenance"][0]["scratch_directory"] == str(
+        tmp_path / "run-scratch"
+    )
     assert manifest["provenance"][0]["execution_backend"].endswith(
         "InMemoryBackend"
     )
 
-    manifest["schema_version"] = 1
-    manifest["status"] = "running"
-    manifest["config"].pop("execution")
-    manifest["config_hash"] = runner._json_hash(manifest["config"])
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.warns(RuntimeWarning, match="execution_backend"):
-        summary = resume_optimization(tmp_path / "run")
-    assert summary.failed == 0
+def test_resume_re_resolves_tmpdir_without_repeating_completed_work(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("pygmo")
+    config_path = write_config(
+        tmp_path,
+        scratch_directory="${TMPDIR}/hydroflow-opt",
+    )
+    add_optimization(config_path, generations=2, seed=123)
+    first_tmpdir = tmp_path / "allocation-1"
+    second_tmpdir = tmp_path / "allocation-2"
+    monkeypatch.setenv("TMPDIR", str(first_tmpdir))
+    original_save = runner._save_checkpoint
+
+    def save_then_interrupt(run_dir, checkpoint):
+        original_save(run_dir, checkpoint)
+        history = checkpoint["history"]
+        if history and history[-1]["generation"] == 1:
+            raise RuntimeError("simulated interruption")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "_save_checkpoint", save_then_interrupt)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            run_optimization(load_config(config_path))
+
+    completed_outcome = (
+        tmp_path
+        / "run"
+        / "evaluations"
+        / "island-000-initial-000"
+        / "outcome.json"
+    )
+    completed_mtime = completed_outcome.stat().st_mtime_ns
+    manifest_path = tmp_path / "run" / "manifest.json"
+    first_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_hash = first_manifest["config_hash"]
+
+    monkeypatch.setenv("TMPDIR", str(second_tmpdir))
+    summary = resume_optimization(tmp_path / "run")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert summary.total == 15
+    assert manifest["config_hash"] == original_hash
+    scratch_directories = [
+        entry["scratch_directory"] for entry in manifest["provenance"]
+    ]
+    assert scratch_directories == [
+        str(first_tmpdir / "hydroflow-opt"),
+        str(second_tmpdir / "hydroflow-opt"),
+    ]
+    assert completed_outcome.stat().st_mtime_ns == completed_mtime
+    resumed_request = json.loads(
+        (
+            tmp_path
+            / "run"
+            / "evaluations"
+            / "island-000-generation-000002-trial-000"
+            / "request.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert resumed_request["context"]["scratch_dir"].startswith(
+        str(second_tmpdir / "hydroflow-opt")
+    )
 
 
 def test_two_islands_restore_migration_database_between_generations(tmp_path):

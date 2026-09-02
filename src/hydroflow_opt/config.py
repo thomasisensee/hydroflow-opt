@@ -1,8 +1,11 @@
 """TOML configuration for case runs and pygmo island optimization."""
 
+import os
 import tomllib
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from string import Template
 from typing import Any
 
 from hydroflow_opt.models import BackendKind, Candidate, ResourceRequest
@@ -73,10 +76,18 @@ class FlowOptConfig:
     resources: ResourceRequest = field(default_factory=ResourceRequest)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     optimization: OptimizationConfig | None = None
+    scratch_dir_template: str | None = field(default=None, repr=False)
+    scratch_dir_base: Path | None = field(default=None, repr=False)
 
 
-def load_config(path: str | Path) -> FlowOptConfig:
-    """Load and validate a ``hydroflow-opt`` TOML configuration."""
+def load_config(
+    path: str | Path, *, resolve_scratch: bool = True
+) -> FlowOptConfig:
+    """Load and validate a ``hydroflow-opt`` TOML configuration.
+
+    Set ``resolve_scratch`` to false only for validation that runs outside the
+    eventual execution environment, such as the ``check`` command.
+    """
     config_path = Path(path).resolve()
     with config_path.open("rb") as stream:
         raw = tomllib.load(stream)
@@ -91,8 +102,14 @@ def load_config(path: str | Path) -> FlowOptConfig:
         raise ValueError("'case.options' must be a TOML table")
 
     run_dir = _resolve_path(base_dir, _expect_str(run, "directory"))
-    scratch_dir = _resolve_path(
-        base_dir, run.get("scratch_directory", run_dir / "scratch")
+    scratch_value = run.get("scratch_directory", str(run_dir / "scratch"))
+    if not isinstance(scratch_value, str) or not scratch_value:
+        raise ValueError("'run.scratch_directory' must be a non-empty string")
+    _validate_scratch_template(scratch_value)
+    scratch_dir = (
+        _resolve_scratch_template(scratch_value, base_dir)
+        if resolve_scratch
+        else _resolve_path(base_dir, scratch_value)
     )
     return FlowOptConfig(
         run_dir=run_dir,
@@ -114,7 +131,32 @@ def load_config(path: str | Path) -> FlowOptConfig:
         ),
         execution=_parse_execution(execution),
         optimization=_parse_optimization(raw.get("optimization"), base_dir),
+        scratch_dir_template=scratch_value,
+        scratch_dir_base=base_dir,
     )
+
+
+def resolve_runtime_config(
+    config: FlowOptConfig,
+    environment: Mapping[str, str] | None = None,
+) -> FlowOptConfig:
+    """Resolve allocation-specific scratch variables for one invocation."""
+    if config.scratch_dir_template is None:
+        return config
+    base_dir = config.scratch_dir_base or Path.cwd()
+    scratch_dir = _resolve_scratch_template(
+        config.scratch_dir_template,
+        base_dir,
+        environment,
+    )
+    return replace(config, scratch_dir=scratch_dir)
+
+
+def scratch_directory_variables(config: FlowOptConfig) -> tuple[str, ...]:
+    """Return environment variables referenced by the scratch template."""
+    if config.scratch_dir_template is None:
+        return ()
+    return tuple(Template(config.scratch_dir_template).get_identifiers())
 
 
 def _parse_execution(raw: dict[str, Any]) -> ExecutionConfig:
@@ -225,3 +267,30 @@ def _expect_positive_int(raw: dict[str, Any], name: str, default: int) -> int:
 def _resolve_path(base_dir: Path, value: str | Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else base_dir / path
+
+
+def _validate_scratch_template(value: str) -> None:
+    if not Template(value).is_valid():
+        raise ValueError(
+            "'run.scratch_directory' contains an invalid environment "
+            "variable placeholder"
+        )
+
+
+def _resolve_scratch_template(
+    value: str,
+    base_dir: Path,
+    environment: Mapping[str, str] | None = None,
+) -> Path:
+    template = Template(value)
+    _validate_scratch_template(value)
+    variables = template.get_identifiers()
+    values = os.environ if environment is None else environment
+    for name in variables:
+        if not values.get(name):
+            raise ValueError(
+                f"run.scratch_directory requires non-empty environment "
+                f"variable '{name}'"
+            )
+    expanded = template.substitute(values)
+    return _resolve_path(base_dir, expanded)

@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if summary.failed == 0 else 1
 
-    config = load_config(args.config)
+    config = load_config(args.config, resolve_scratch=args.command != "check")
     case_from_name(config.case_name)
     if args.command == "check":
         print(f"configuration ok: case={config.case_name}")
