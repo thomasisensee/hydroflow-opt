@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from hydroflow_opt.backends.staged import StagedBackend
+from hydroflow_opt.config import (
+    FlowOptConfig,
+    scratch_directory_variables,
+)
 from hydroflow_opt.models import EvaluationStage
 
 
@@ -13,7 +17,7 @@ class SlurmBackend(StagedBackend):
     """Place every evaluation stage in an explicit Slurm job step."""
 
     @staticmethod
-    def validate_environment() -> None:
+    def validate_environment(config: FlowOptConfig | None = None) -> None:
         """Require an existing allocation and an available ``srun`` command."""
         if "SLURM_JOB_ID" not in os.environ:
             raise RuntimeError(
@@ -24,10 +28,28 @@ class SlurmBackend(StagedBackend):
             raise RuntimeError(
                 "Slurm execution requires the 'srun' executable on PATH"
             )
+        if config is not None and "TMPDIR" in scratch_directory_variables(
+            config
+        ):
+            raw_nodes = os.environ.get(
+                "SLURM_JOB_NUM_NODES", os.environ.get("SLURM_NNODES")
+            )
+            try:
+                nodes = int(raw_nodes) if raw_nodes is not None else None
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Slurm $TMPDIR scratch requires a valid "
+                    "SLURM_JOB_NUM_NODES value"
+                ) from exc
+            if nodes != 1:
+                raise RuntimeError(
+                    "Slurm $TMPDIR scratch requires exactly one allocated "
+                    "node (SLURM_JOB_NUM_NODES=1)"
+                )
 
     def launch_command(self, stage: EvaluationStage) -> list[str]:
         """Translate a portable stage into an exclusive one-node job step."""
-        self.validate_environment()
+        self.validate_environment(self.config)
         resources = stage.resources
         command = [
             "srun",

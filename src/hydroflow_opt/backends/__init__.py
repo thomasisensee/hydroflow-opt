@@ -19,7 +19,7 @@ def backend_from_config(
 def validate_execution_environment(config: FlowOptConfig) -> None:
     """Validate runtime prerequisites for the selected built-in backend."""
     if config.execution.backend is BackendKind.SLURM:
-        SlurmBackend.validate_environment()
+        SlurmBackend.validate_environment(config)
 
 
 __all__ = [

@@ -29,6 +29,8 @@ scratch-directory/
 
 Plugins decide which case files remain after success. Failed evaluations should normally retain diagnostic files.
 
+When the scratch root uses node-local storage such as `$TMPDIR`, its contents normally disappear after the allocation. Structured results, outcomes, metadata, and logs from completed stages remain in the persistent run directory. Hydroflow-opt does not copy complete failed simulation cases back automatically. Because stage output is captured and written after the command exits, output from a stage interrupted by allocation termination may also be unavailable.
+
 ## Evaluation files
 
 `request.json` contains the candidate, case selection, paths, resources, backend, and optional optimization context.
@@ -66,4 +68,4 @@ run-directory/
     └── champions.json
 ```
 
-`manifest.json` stores the effective configuration, parameter space, provenance, evaluation identifiers, and completion status. `checkpoint.json` is the authoritative resume state.
+`manifest.json` stores the effective configuration, parameter space, provenance, evaluation identifiers, and completion status. Scratch-directory templates are stored without allocation-specific expansion, while every start or resume provenance entry records the concrete path used. A resumed run therefore resolves variables such as `$TMPDIR` again for its new allocation. `checkpoint.json` is the authoritative resume state.
