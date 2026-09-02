@@ -88,6 +88,10 @@ hydroflow-opt optimize hydrofoil.toml
 with:
 
 ```toml
+[run]
+directory = "/persistent/workspace/runs/hydrofoil"
+scratch_directory = "${TMPDIR}/hydrofoil-opt"
+
 [execution]
 backend = "slurm"
 
@@ -105,7 +109,7 @@ srun --exclusive --nodes=1 --ntasks=2 --cpus-per-task=1 \
   --cpu-bind=cores --mpi=pmix
 ```
 
-This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node. Because successive stages may run on different nodes, their scratch directory must be visible from every allocated node. Partition, time limit, node count, and total allocation size remain properties of the outer Slurm job.
+This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node. In a single-node allocation, `${TMPDIR}` can place simulation cases on fast node-local storage. Hydroflow-opt rejects `${TMPDIR}` scratch in a multi-node allocation because successive stages may run on different nodes. Multi-node allocations require a scratch directory visible from every allocated node. Partition, time limit, node count, and total allocation size remain properties of the outer Slurm job.
 
 ## Optimize with islands
 

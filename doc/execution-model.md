@@ -47,7 +47,7 @@ srun --exclusive --nodes=1 \
   --cpu-bind=cores [--mpi=pmix] <stage command>
 ```
 
-`--mpi=pmix` is added for multi-process stages. Successive stages may run on different nodes, so their evaluation and scratch paths must be visible from every allocated node. Queue, wall-time, and allocation size remain properties of the outer Slurm job.
+`--mpi=pmix` is added for multi-process stages. Successive stages may run on different nodes. A scratch template referencing `$TMPDIR` is therefore supported only when `SLURM_JOB_NUM_NODES` is exactly one; hydroflow-opt rejects it before creating run files otherwise. Multi-node allocations require scratch storage visible from every allocated node. Other environment-variable paths are allowed, and the user is responsible for ensuring that they provide the required visibility. Queue, wall-time, and allocation size remain properties of the outer Slurm job.
 
 ## Failures and repeated evaluations
 

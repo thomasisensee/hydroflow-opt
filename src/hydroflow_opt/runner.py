@@ -28,6 +28,7 @@ from hydroflow_opt.config import (
     ExecutionConfig,
     FlowOptConfig,
     OptimizationConfig,
+    resolve_runtime_config,
 )
 from hydroflow_opt.models import (
     BackendKind,
@@ -45,8 +46,7 @@ from hydroflow_opt.results import (
     write_result,
 )
 
-_MANIFEST_SCHEMA = 2
-_SUPPORTED_MANIFEST_SCHEMAS = {1, _MANIFEST_SCHEMA}
+_MANIFEST_SCHEMA = 1
 _CHECKPOINT_SCHEMA = 1
 _PENALTY = 1.0e12
 
@@ -69,6 +69,7 @@ def run_local(
     backend: EvaluationBackend | None = None,
 ) -> RunSummary:
     """Evaluate explicit candidates with the configured isolated worker."""
+    config = resolve_runtime_config(config)
     if not config.candidates:
         raise ValueError("'run' requires at least one [[candidate]] entry")
     case = case_from_name(config.case_name)
@@ -92,6 +93,7 @@ def run_optimization(
     backend: EvaluationBackend | None = None,
 ) -> RunSummary:
     """Start a new resumable pygmo DE optimization."""
+    config = resolve_runtime_config(config)
     _validate_optimization(config)
     if backend is None:
         validate_execution_environment(config)
@@ -126,7 +128,7 @@ def resume_optimization(
     """Continue a compatible optimization from its latest checkpoint."""
     run_path = Path(run_dir).resolve()
     manifest = _read_json(_manifest_path(run_path))
-    if manifest.get("schema_version") not in _SUPPORTED_MANIFEST_SCHEMAS:
+    if manifest.get("schema_version") != _MANIFEST_SCHEMA:
         raise ValueError("unsupported optimization manifest schema")
     if manifest.get("kind") != "optimization":
         raise ValueError("run is not a resumable optimization")
@@ -135,7 +137,9 @@ def resume_optimization(
     if _json_hash(manifest["config"]) != manifest.get("config_hash"):
         raise ValueError("effective run configuration does not match its hash")
 
-    config = _config_from_manifest(run_path, manifest["config"])
+    config = resolve_runtime_config(
+        _config_from_manifest(run_path, manifest["config"])
+    )
     _validate_optimization(config)
     if backend is None:
         validate_execution_environment(config)
@@ -144,7 +148,9 @@ def resume_optimization(
     space = case.parameter_space(config.case_options)
     _validate_parameter_space(manifest["parameter_space"], space)
 
-    provenance = _provenance(case, _backend_name(config, backend))
+    provenance = _provenance(
+        case, _backend_name(config, backend), config.scratch_dir
+    )
     compatibility_warnings = _provenance_warnings(
         manifest["provenance"][-1], provenance
     )
@@ -582,7 +588,7 @@ def _new_manifest(
     backend_name: str,
 ) -> dict[str, Any]:
     effective = _effective_config(config)
-    provenance = _provenance(case, backend_name)
+    provenance = _provenance(case, backend_name, config.scratch_dir)
     provenance["started_at"] = _now()
     return {
         "schema_version": _MANIFEST_SCHEMA,
@@ -605,9 +611,18 @@ def _new_manifest(
 
 def _effective_config(config: FlowOptConfig) -> dict[str, Any]:
     assert config.optimization is not None
+    scratch_template = config.scratch_dir_template
+    scratch_base = config.scratch_dir_base
+    if scratch_template is None:
+        scratch_template = str(config.scratch_dir.resolve())
     return {
         "run_dir": str(config.run_dir.resolve()),
-        "scratch_dir": str(config.scratch_dir.resolve()),
+        "scratch_directory": {
+            "template": scratch_template,
+            "base_directory": (
+                str(scratch_base.resolve()) if scratch_base else None
+            ),
+        },
         "case_name": config.case_name,
         "case_options": config.case_options,
         "resources": asdict(config.resources),
@@ -617,9 +632,21 @@ def _effective_config(config: FlowOptConfig) -> dict[str, Any]:
 
 
 def _config_from_manifest(run_dir: Path, raw: dict[str, Any]) -> FlowOptConfig:
+    scratch_raw = raw.get("scratch_directory")
+    if not isinstance(scratch_raw, dict):
+        raise ValueError("invalid scratch directory in run manifest")
+    template = scratch_raw.get("template")
+    base_directory = scratch_raw.get("base_directory")
+    if not isinstance(template, str) or not template:
+        raise ValueError("invalid scratch directory template in manifest")
+    if base_directory is not None and not isinstance(base_directory, str):
+        raise ValueError("invalid scratch base directory in manifest")
+    scratch_base = (
+        Path(base_directory) if base_directory is not None else run_dir
+    )
     return FlowOptConfig(
         run_dir=run_dir,
-        scratch_dir=Path(raw["scratch_dir"]),
+        scratch_dir=run_dir / "scratch",
         case_name=str(raw["case_name"]),
         case_options=dict(raw["case_options"]),
         resources=ResourceRequest(**raw["resources"]),
@@ -629,14 +656,19 @@ def _config_from_manifest(run_dir: Path, raw: dict[str, Any]) -> FlowOptConfig:
             )
         ),
         optimization=OptimizationConfig(**raw["optimization"]),
+        scratch_dir_template=template,
+        scratch_dir_base=scratch_base,
     )
 
 
-def _provenance(case: CasePlugin, backend_name: str) -> dict[str, Any]:
+def _provenance(
+    case: CasePlugin, backend_name: str, scratch_dir: Path
+) -> dict[str, Any]:
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "execution_backend": backend_name,
+        "scratch_directory": str(scratch_dir.resolve()),
         "packages": {
             "hydroflow_opt": _package_version("hydroflow_opt"),
             "pygmo": _package_version("pygmo"),
