@@ -131,7 +131,11 @@ migrant_handling = "preserve" # or "evict"
 hydroflow-opt optimize path/to/config.toml
 ```
 
-By default, pygmo generates and evaluates each island's initial population. To reuse a database of pre-evaluated individuals, provide a JSON object whose values are `[parameter_vector, objective]` records:
+By default, pygmo generates and evaluates initial populations concurrently across islands, using the same process pool as evolution. Candidates within each island are evaluated sequentially. The pool is explicitly sized to the smaller of `optimization.islands` and `resources.concurrent_evaluations`; the current configuration requires at least as many evaluation slots as islands. In Slurm mode, these Python workers coordinate on the launching node while the backend places simulation stages within the allocation using `srun`.
+
+Completed initial populations are checkpointed in island order. Later islands may finish before they are checkpointed; their saved candidate outcomes are reused on resume. Initialization errors wait for already-started workers to finish before returning.
+
+To reuse a database of pre-evaluated individuals, provide a JSON object whose values are `[parameter_vector, objective]` records:
 
 ```toml
 [optimization]

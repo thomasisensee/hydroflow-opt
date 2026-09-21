@@ -30,6 +30,7 @@ hydroflow-opt resume path/to/run
 The manifest records Python, platform, backend, core, pygmo, NumPy, and plugin versions. Version changes on resume produce warnings. Reproducibility is best-effort because solver and platform behavior may still differ.
 
 ## Initial populations
+By default, initial populations are generated and evaluated concurrently across islands, using the same process pool as evolution. This is an explicit hydroflow-opt initialization step: population construction already runs fitness evaluations, so it is dispatched to workers before evolution begins. Candidates within each island are evaluated sequentially, with overall concurrency limited by `optimization.islands` and `resources.concurrent_evaluations`.
 
 `initial_population_file` can provide previously evaluated designs. It is a JSON object whose values are `[parameter_vector, objective]` records:
 
