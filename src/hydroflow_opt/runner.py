@@ -237,6 +237,19 @@ def inspect_run(run_dir: str | Path) -> RunSummary:
     )
 
 
+class _InitializePopulation:
+    """Construct and evaluate one population inside a pygmo worker."""
+
+    def __init__(self, size: int, seed: int) -> None:
+        self.size = size
+        self.seed = seed
+
+    def evolve(self, population: Any) -> Any:
+        """Populate the supplied problem using its stable island seed."""
+        pg = _import_pygmo()
+        return pg.population(population.problem, self.size, seed=self.seed)
+
+
 def _continue_optimization(
     config: FlowOptConfig,
     manifest: dict[str, Any],
@@ -256,6 +269,12 @@ def _continue_optimization(
             "history": [],
         }
     _validate_checkpoint(checkpoint, manifest, optimization)
+    workers = min(
+        optimization.islands, config.resources.concurrent_evaluations
+    )
+    pg.mp_island.init_pool(processes=workers)
+    if pg.mp_island.get_pool_size() != workers:
+        pg.mp_island.resize_pool(workers)
     _initialize_populations(config, manifest, checkpoint, pg, backend)
 
     completed_generation = min(
@@ -328,37 +347,62 @@ def _initialize_populations(
         )
         else None
     )
-    for island in range(len(checkpoint["islands"]), optimization.islands):
-        problem = pg.problem(
-            _OptimizationProblem(
-                config,
-                manifest["run_id"],
-                island,
-                0,
-                "initial",
-                backend,
+    pending: dict[int, Any] = {}
+    first_island = len(checkpoint["islands"])
+    try:
+        # Submit every island before waiting; population construction itself
+        # performs fitness calls and must therefore happen in the worker.
+        for island in range(first_island, optimization.islands):
+            problem = pg.problem(
+                _OptimizationProblem(
+                    config, manifest["run_id"], island, 0, "initial", backend
+                )
             )
-        )
+            population = pg.population(problem, 0)
+            seed = _derived_seed(optimization.seed, "population", island, 0)
+            if initial_population is None:
+                worker = pg.island(
+                    udi=pg.mp_island(),
+                    algo=pg.algorithm(
+                        _InitializePopulation(
+                            optimization.population_size, seed
+                        )
+                    ),
+                    pop=population,
+                )
+                pending[island] = worker
+                worker.evolve()
+            else:
+                selected = random.Random(seed).sample(
+                    initial_population, optimization.population_size
+                )
+                for vector, fitness in selected:
+                    population.push_back(vector, [fitness])
+                pending[island] = population
+
+        # Checkpoints remain an ordered prefix, even if workers finish in a
+        # different order. Candidate outcome files independently support reuse.
+        for island, item in pending.items():
+            if initial_population is None:
+                item.wait_check()
+                population = item.get_population()
+                checkpoint["evaluation_ids"].extend(
+                    _initial_ids(island, optimization.population_size)
+                )
+            else:
+                population = item
+            checkpoint["islands"].append(
+                _population_state(population, island, 0)
+            )
+            _save_checkpoint(config.run_dir, checkpoint)
+            manifest["evaluation_ids"] = checkpoint["evaluation_ids"]
+            _atomic_json(_manifest_path(config.run_dir), manifest)
+    finally:
         if initial_population is None:
-            population = pg.population(
-                problem,
-                optimization.population_size,
-                seed=_derived_seed(optimization.seed, "population", island, 0),
-            )
-            checkpoint["evaluation_ids"].extend(
-                _initial_ids(island, optimization.population_size)
-            )
-        else:
-            population = pg.population(problem)
-            selected = random.Random(
-                _derived_seed(optimization.seed, "population", island, 0)
-            ).sample(initial_population, optimization.population_size)
-            for vector, fitness in selected:
-                population.push_back(vector, [fitness])
-        checkpoint["islands"].append(_population_state(population, island, 0))
-        _save_checkpoint(config.run_dir, checkpoint)
-        manifest["evaluation_ids"] = checkpoint["evaluation_ids"]
-        _atomic_json(_manifest_path(config.run_dir), manifest)
+            # wait() drains tasks without rethrowing their algorithm errors,
+            # preserving the original worker or checkpoint exception.
+            for worker in pending.values():
+                worker.wait()
 
 
 def _build_archipelago(

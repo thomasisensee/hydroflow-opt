@@ -1,8 +1,12 @@
 """Tests that need no CFD runtime or scheduler."""
 
 import json
+import multiprocessing
+import os
 import pickle
 import subprocess
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -38,6 +42,34 @@ class InMemoryBackend:
     def evaluate(self, candidate, context=None):
         objective = sum(value**2 for value in candidate.parameters.values())
         return EvaluationResult.success(candidate.id, objective)
+
+
+class RecordingInitializationBackend:
+    """Record worker activity through multiprocessing manager proxies."""
+
+    def __init__(self, events, barrier, failure=None):
+        self.events = events
+        self.barrier = barrier
+        self.failure = failure
+
+    def __deepcopy__(self, memo):
+        # pygmo copies problems; retain proxies to the shared recorder and
+        # barrier rather than copying the manager's underlying objects.
+        return type(self)(self.events, self.barrier, self.failure)
+
+    def evaluate(self, candidate, context=None):
+        self.events.append(
+            ("start", candidate.id, context.island, os.getpid())
+        )
+        if context.phase == "initial" and context.position == 0:
+            self.barrier.wait(timeout=20)
+            if context.island == 0 and self.failure == "exception":
+                raise RuntimeError("initialization worker failed")
+        result = InMemoryBackend().evaluate(candidate, context)
+        if self.failure == "result":
+            result = EvaluationResult.failed(candidate.id, "simulation failed")
+        self.events.append(("end", candidate.id, context.island, os.getpid()))
+        return result
 
 
 class TwoStageCase:
@@ -1065,3 +1097,201 @@ def test_optimization_accepts_backend_without_worker_result_files(tmp_path):
     evaluation = tmp_path / "run" / "evaluations" / "island-000-initial-000"
     assert (evaluation / "outcome.json").exists()
     assert not (evaluation / "result.json").exists()
+
+
+def stop_before_evolution(*args, **kwargs):
+    raise RuntimeError("initialization complete")
+
+
+def test_initialization_parallelism_and_serial_equivalence(
+    tmp_path, monkeypatch
+):
+    pg = pytest.importorskip("pygmo")
+    path = write_config(tmp_path, concurrent=2)
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    # Exercise resizing a pool that already exists with the wrong size.
+    pg.mp_island.init_pool(processes=1)
+    pg.mp_island.resize_pool(1)
+    monkeypatch.setattr(runner, "_build_archipelago", stop_before_evolution)
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        events = manager.list()
+        backend = RecordingInitializationBackend(events, manager.Barrier(2))
+        with pytest.raises(RuntimeError, match="initialization complete"):
+            run_optimization(config, backend=backend)
+        recorded = list(events)
+    assert pg.mp_island.get_pool_size() == 2
+    active = set()
+    peak = 0
+    starts = []
+    for action, candidate_id, island, pid in recorded:
+        assert pid != os.getpid()
+        if action == "start":
+            assert island not in active
+            active.add(island)
+            starts.append(candidate_id)
+            peak = max(peak, len(active))
+        else:
+            active.remove(island)
+    assert peak == 2
+    assert not active
+    checkpoint = runner._load_checkpoint(config.run_dir, required=True)
+    assert len(starts) == len(set(starts)) == 10
+    assert checkpoint["evaluation_ids"] == [
+        candidate_id
+        for island in range(2)
+        for candidate_id in runner._initial_ids(island, 5)
+    ]
+    for island in range(2):
+        assert [
+            name for name in starts if name.startswith(f"island-{island:03d}")
+        ] == runner._initial_ids(island, 5)
+        # Avoid overwriting concurrent results with the serial reference.
+        problem = pg.problem(
+            runner._OptimizationProblem(
+                replace(config, run_dir=tmp_path / "serial"),
+                "serial-reference",
+                island,
+                0,
+                "initial",
+                InMemoryBackend(),
+            )
+        )
+        population = pg.population(
+            problem, 5, seed=runner._derived_seed(42, "population", island, 0)
+        )
+        assert checkpoint["islands"][island] == runner._population_state(
+            population, island, 0
+        )
+
+
+def test_initialization_resume_reuses_uncheckpointed_outcomes(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("pygmo")
+    path = write_config(tmp_path, concurrent=2)
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    save = runner._save_checkpoint
+
+    def save_first_then_interrupt(run_dir, checkpoint):
+        save(run_dir, checkpoint)
+        if len(checkpoint["islands"]) == 1:
+            raise RuntimeError("checkpoint interrupted")
+
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        events = manager.list()
+        backend = RecordingInitializationBackend(events, manager.Barrier(2))
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                runner, "_save_checkpoint", save_first_then_interrupt
+            )
+            with pytest.raises(RuntimeError, match="checkpoint interrupted"):
+                run_optimization(config, backend=backend)
+        recorded = list(events)
+        # All tasks drained despite the interruption.
+        assert len(recorded) == 20
+        checkpoint = runner._load_checkpoint(config.run_dir, required=True)
+        assert len(checkpoint["islands"]) == 1
+        later_outcomes = list(
+            config.run_dir.glob(
+                "evaluations/island-001-initial-*/outcome.json"
+            )
+        )
+        assert len(later_outcomes) == 5
+        with monkeypatch.context() as patch:
+            patch.setattr(runner, "_build_archipelago", stop_before_evolution)
+            with pytest.raises(RuntimeError, match="initialization complete"):
+                resume_optimization(config.run_dir, backend=backend)
+        assert list(events) == recorded
+    resumed = runner._load_checkpoint(config.run_dir, required=True)
+    assert resumed["islands"][0] == checkpoint["islands"][0]
+    assert len(resumed["islands"]) == 2
+    assert len(resumed["evaluation_ids"]) == 10
+    for outcome_path in later_outcomes:
+        outcome = json.loads(outcome_path.read_text())
+        position = int(outcome["candidate_id"].rsplit("-", 1)[1])
+        assert resumed["islands"][1]["f"][position] == [outcome["objective"]]
+
+
+@pytest.mark.parametrize("failure", ["exception", "result"])
+def test_initialization_failures_drain_workers(tmp_path, monkeypatch, failure):
+    pytest.importorskip("pygmo")
+    path = write_config(tmp_path, concurrent=2)
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    monkeypatch.setattr(runner, "_build_archipelago", stop_before_evolution)
+    expected = (
+        "initialization worker failed"
+        if failure == "exception"
+        else "initialization complete"
+    )
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        events = manager.list()
+        backend = RecordingInitializationBackend(
+            events, manager.Barrier(2), failure
+        )
+        with pytest.raises(RuntimeError, match=expected):
+            run_optimization(config, backend=backend)
+        recorded = list(events)
+    assert (
+        len(
+            [
+                event
+                for event in recorded
+                if event[0] == "end" and event[2] == 1
+            ]
+        )
+        == 5
+    )
+    if failure == "result":
+        checkpoint = runner._load_checkpoint(config.run_dir, required=True)
+        assert all(
+            fitness == [runner._PENALTY]
+            for island in checkpoint["islands"]
+            for fitness in island["f"]
+        )
+
+
+def test_parallel_initialization_uses_slurm_backend(tmp_path, monkeypatch):
+    pg = pytest.importorskip("pygmo")
+    launcher = tmp_path / "srun"
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        "flags = []\n"
+        "while args[0].startswith('--'):\n"
+        "    flags.append(args.pop(0))\n"
+        "destination = pathlib.Path(args[-1]).parent / 'slurm-call.json'\n"
+        "destination.write_text(json.dumps({'flags': flags, "
+        "'job': os.environ['SLURM_JOB_ID']}))\n"
+        "sys.exit(subprocess.run(args, check=False).returncode)\n"
+    )
+    launcher.chmod(0o755)
+    # Spawn fresh workers so they inherit this allocation and launcher.
+    pg.mp_island.shutdown_pool()
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SLURM_JOB_ID", "initialization-test")
+    monkeypatch.setattr(runner, "_build_archipelago", stop_before_evolution)
+    path = write_config(tmp_path, concurrent=2, backend="slurm")
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    try:
+        with pytest.raises(RuntimeError, match="initialization complete"):
+            run_optimization(config)
+        calls = list(config.run_dir.glob("evaluations/*/slurm-call.json"))
+        assert len(calls) == 10
+        for call in calls:
+            assert json.loads(call.read_text()) == {
+                "job": "initialization-test",
+                "flags": [
+                    "--exclusive",
+                    "--nodes=1",
+                    "--ntasks=1",
+                    "--cpus-per-task=1",
+                    "--cpu-bind=cores",
+                ],
+            }
+    finally:
+        pg.mp_island.shutdown_pool()
