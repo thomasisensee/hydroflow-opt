@@ -47,6 +47,25 @@ class SlurmBackend(StagedBackend):
                     "node (SLURM_JOB_NUM_NODES=1)"
                 )
 
+        if config is not None:
+            memory = config.resources.memory_mib_per_evaluation
+            if memory is None:
+                raise ValueError("Slurm requires memory_mib_per_evaluation")
+            raw_memory = os.environ.get("SLURM_MEM_PER_NODE", "")
+            raw_nodes = os.environ.get(
+                "SLURM_JOB_NUM_NODES", os.environ.get("SLURM_NNODES", "")
+            )
+            if raw_memory.isdecimal() and raw_nodes.isdecimal():
+                per_node, nodes = int(raw_memory), int(raw_nodes)
+                if per_node > 0 and nodes > 0:
+                    capacity = nodes * (per_node // memory)
+                    if capacity < config.resources.concurrent_evaluations:
+                        raise RuntimeError(
+                            f"Slurm memory allocation fits only {capacity} "
+                            f"concurrent evaluations at {memory} MiB each; "
+                            "request more memory or reduce concurrency/budget"
+                        )
+
     def launch_command(self, stage: EvaluationStage) -> list[str]:
         """Translate a portable stage into an exclusive one-node job step."""
         self.validate_environment(self.config)
@@ -58,6 +77,7 @@ class SlurmBackend(StagedBackend):
             f"--ntasks={resources.processes}",
             f"--cpus-per-task={resources.threads_per_process}",
             "--cpu-bind=cores",
+            f"--mem={self.config.resources.memory_mib_per_evaluation}M",
         ]
         if resources.processes > 1:
             command.append("--mpi=pmix")

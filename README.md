@@ -71,6 +71,10 @@ select the backend explicitly:
 ```toml
 [execution]
 backend = "slurm"
+
+[resources]
+# Trial budget; validate against your workload.
+memory_mib_per_evaluation = 1536
 ```
 
 The command must run inside an allocation created by `sbatch` or `salloc`. `hydroflow-opt` deliberately refuses to invoke `srun` without `SLURM_JOB_ID`, preventing candidates from becoming separately queued jobs. For example:
@@ -79,6 +83,7 @@ The command must run inside an allocation created by `sbatch` or `salloc`. `hydr
 #!/bin/bash
 #SBATCH --nodes=1
 #SBATCH --ntasks=8
+#SBATCH --mem=8G
 #SBATCH --cpus-per-task=1
 #SBATCH --hint=nomultithread
 
@@ -98,6 +103,7 @@ backend = "slurm"
 [resources]
 available_cpus = 8
 concurrent_evaluations = 4
+memory_mib_per_evaluation = 1536
 mpi_ranks = 2
 threads_per_rank = 1
 ```
@@ -106,7 +112,7 @@ Every plugin supplies an ordered evaluation plan. Each stage is launched as an e
 
 ```text
 srun --exclusive --nodes=1 --ntasks=2 --cpus-per-task=1 \
-  --cpu-bind=cores --mpi=pmix
+  --cpu-bind=cores --mem=1536M --mpi=pmix
 ```
 
 This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node. In a single-node allocation, `${TMPDIR}` can place simulation cases on fast node-local storage. Hydroflow-opt rejects `${TMPDIR}` scratch in a multi-node allocation because successive stages may run on different nodes. Multi-node allocations require a scratch directory visible from every allocated node. Partition, time limit, node count, and total allocation size remain properties of the outer Slurm job.
@@ -159,3 +165,5 @@ The initial implementation supports pygmo differential evolution and a fully-con
 Publish an entry point in the `hydroflow_opt.cases` group. Its plugin object exposes `parameter_space(options)` and `evaluation_plan(candidate, paths, resources)`. The latter returns an ordered `EvaluationPlan` of `EvaluationStage` objects. Each stage declares a command, working directory, and portable `StageResources(processes, threads_per_process)` shape.
 
 The local or Slurm backend adds the appropriate launcher. Plugins must never construct `mpiexec` or `srun` commands. The final stage writes the structured JSON result to `paths.result_path`; `hydroflow-opt` validates it and adds the recorded stage timings. A nonzero stage exit stops the plan and becomes a structured failed evaluation.
+
+Slurm runs require `resources.memory_mib_per_evaluation`, the total per-stage reservation in MiB. See [memory configuration and resume overrides](doc/configuration.md#slurm-memory-budget).

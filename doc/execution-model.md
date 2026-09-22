@@ -44,7 +44,7 @@ The Slurm backend requires an existing `sbatch` or `salloc` allocation. Every st
 ```text
 srun --exclusive --nodes=1 \
   --ntasks=<processes> --cpus-per-task=<threads> \
-  --cpu-bind=cores [--mpi=pmix] <stage command>
+  --cpu-bind=cores --mem=<memory_mib_per_evaluation>M [--mpi=pmix] <stage command>
 ```
 
 `--mpi=pmix` is added for multi-process stages. Successive stages may run on different nodes. A scratch template referencing `$TMPDIR` is therefore supported only when `SLURM_JOB_NUM_NODES` is exactly one; hydroflow-opt rejects it before creating run files otherwise. Multi-node allocations require scratch storage visible from every allocated node. Other environment-variable paths are allowed, and the user is responsible for ensuring that they provide the required visibility. Queue, wall-time, and allocation size remain properties of the outer Slurm job.
@@ -54,3 +54,7 @@ srun --exclusive --nodes=1 \
 A stage that cannot start or exits nonzero stops the plan and produces a failed result. Invalid or missing final output also becomes a failed result. Completed stage timings and the failed stage name are retained.
 
 If the same request already has a valid result, the backend reuses it. If an evaluation directory contains incompatible or invalid files, those files are moved to `attempts/attempt-NNNN/` before another attempt.
+
+All Slurm stages also receive `--mem=<memory_mib_per_evaluation>M`. This
+required evaluation budget overrides inherited batch memory reservations;
+see [configuration](configuration.md#slurm-memory-budget).

@@ -10,6 +10,7 @@ import secrets
 import shutil
 import uuid
 import warnings
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib import metadata
@@ -124,6 +125,7 @@ def resume_optimization(
     run_dir: str | Path,
     *,
     backend: EvaluationBackend | None = None,
+    memory_mib_per_evaluation: int | None = None,
 ) -> RunSummary:
     """Continue a compatible optimization from its latest checkpoint."""
     run_path = Path(run_dir).resolve()
@@ -137,8 +139,20 @@ def resume_optimization(
     if _json_hash(manifest["config"]) != manifest.get("config_hash"):
         raise ValueError("effective run configuration does not match its hash")
 
+    saved_config = deepcopy(manifest["config"])
+    previous_memory = saved_config["resources"].get(
+        "memory_mib_per_evaluation"
+    )
+    if memory_mib_per_evaluation is not None:
+        if saved_config.get("execution", {}).get("backend") != "slurm":
+            raise ValueError(
+                "memory override is only supported for Slurm resume"
+            )
+        saved_config["resources"]["memory_mib_per_evaluation"] = (
+            memory_mib_per_evaluation
+        )
     config = resolve_runtime_config(
-        _config_from_manifest(run_path, manifest["config"])
+        _config_from_manifest(run_path, saved_config)
     )
     _validate_optimization(config)
     if backend is None:
@@ -156,11 +170,22 @@ def resume_optimization(
     )
     for message in compatibility_warnings:
         warnings.warn(message, RuntimeWarning, stacklevel=2)
+    checkpoint = _load_checkpoint(config.run_dir, required=False)
+    if checkpoint is not None:
+        assert config.optimization is not None
+        _validate_checkpoint(checkpoint, manifest, config.optimization)
+    if memory_mib_per_evaluation is not None:
+        provenance["memory_override"] = {
+            "previous_config_hash": manifest["config_hash"],
+            "old_mib": previous_memory,
+            "new_mib": memory_mib_per_evaluation,
+        }
+        manifest["config"] = saved_config
+        manifest["config_hash"] = _json_hash(saved_config)
     provenance["resumed_at"] = _now()
     provenance["warnings"] = compatibility_warnings
     manifest["provenance"].append(provenance)
     manifest["status"] = "running"
-    checkpoint = _load_checkpoint(config.run_dir, required=False)
     if checkpoint is not None:
         manifest["evaluation_ids"] = checkpoint["evaluation_ids"]
         _sync_history(config.run_dir, checkpoint.get("history", []))

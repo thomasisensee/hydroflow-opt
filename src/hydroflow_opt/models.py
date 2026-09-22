@@ -100,15 +100,26 @@ class ParameterSpace:
 
 @dataclass(frozen=True)
 class ResourceRequest:
-    """The complete CPU shape of one evaluation and its local capacity."""
+    """CPU capacity and the total memory reservation for each evaluation."""
 
     available_cpus: int = 1
     concurrent_evaluations: int = 1
     mpi_ranks: int = 1
     threads_per_rank: int = 1
+    memory_mib_per_evaluation: int | None = None
 
     def __post_init__(self) -> None:
         """Validate positive counts and the total CPU budget."""
+        memory = self.memory_mib_per_evaluation
+        if memory is not None and (
+            isinstance(memory, bool)
+            or not isinstance(memory, int)
+            or memory < 1
+        ):
+            raise ValueError(
+                "resources.memory_mib_per_evaluation "
+                "must be a positive integer"
+            )
         values = (
             self.available_cpus,
             self.concurrent_evaluations,

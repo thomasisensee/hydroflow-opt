@@ -80,3 +80,47 @@ concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus islan
 | `hydroflow-opt optimize CONFIG` | Start a new optimization. |
 | `hydroflow-opt resume RUN_DIR` | Continue a checkpointed optimization. |
 | `hydroflow-opt inspect RUN_DIR` | Print a completed run summary. |
+
+## Slurm memory budget
+
+Slurm configurations require an explicit positive integer under `[resources]`:
+
+```toml
+[resources]
+memory_mib_per_evaluation = 1536
+```
+
+This is the total memory reservation in MiB for one stage across all its MPI
+processes, not memory per rank. Every stage requests the same budget through
+`srun --mem=1536M`, overriding inherited batch memory requests. Since stages
+within an evaluation run sequentially, their reservations are not summed.
+Local execution accepts and records this setting but does not enforce it.
+
+`1536` is a trial value, not a measured requirement for every design. Budget
+for the largest stage and leave headroom for Python workers and scheduler
+processes. For example, 32 simultaneous stages at 1536 MiB reserve 48 GiB on
+a node allocated 64 GiB. `#SBATCH --mem` still specifies memory **per node**.
+
+When positive numeric `SLURM_MEM_PER_NODE` and node counts are available,
+hydroflow-opt checks `nodes * floor(memory_per_node / budget)` against
+`concurrent_evaluations` before starting workers. Unknown or zero-valued
+allocation information skips this check. Passing it does not guarantee CPU
+placement or sufficient memory headroom; normal scheduling waits can remain.
+
+Older Slurm TOMLs must add the field. Resume reads its saved configuration,
+not the original TOML; supply or change its budget with:
+
+```bash
+hydroflow-opt resume runs/tistos-64 --memory-mib-per-evaluation 1536
+```
+
+The override is Slurm-only, validated before persisting, and saved atomically
+with an updated configuration hash and provenance recording the old/new budgets
+and previous hash. Later resumes use the saved value. Completed outcomes remain
+reusable; interrupted evaluations rerun, while previously recorded failed
+outcomes retain the existing reuse behavior. Completed runs remain a no-op.
+
+Before scaling up, run two islands on one node with adequate CPUs and memory.
+Use `sacct` to verify overlapping steps with the configured memory reservation,
+and check memory usage and failures before increasing concurrency. Stage timings
+still include time spent waiting for Slurm to launch the step.

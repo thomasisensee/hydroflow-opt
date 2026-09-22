@@ -79,6 +79,17 @@ class FlowOptConfig:
     scratch_dir_template: str | None = field(default=None, repr=False)
     scratch_dir_base: Path | None = field(default=None, repr=False)
 
+    def __post_init__(self) -> None:
+        """Require an explicit memory reservation for Slurm steps."""
+        if (
+            self.execution.backend is BackendKind.SLURM
+            and self.resources.memory_mib_per_evaluation is None
+        ):
+            raise ValueError(
+                "Slurm requires resources.memory_mib_per_evaluation; "
+                "set it in TOML or use resume --memory-mib-per-evaluation"
+            )
+
 
 def load_config(
     path: str | Path, *, resolve_scratch: bool = True
@@ -123,6 +134,9 @@ def load_config(
             ),
             concurrent_evaluations=_expect_positive_int(
                 resources, "concurrent_evaluations", 1
+            ),
+            memory_mib_per_evaluation=resources.get(
+                "memory_mib_per_evaluation"
             ),
             mpi_ranks=_expect_positive_int(resources, "mpi_ranks", 1),
             threads_per_rank=_expect_positive_int(
