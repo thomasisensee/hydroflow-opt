@@ -144,6 +144,9 @@ def write_config(
 backend = "{backend}"
 """
     )
+    memory_line = (
+        "memory_mib_per_evaluation = 1536" if backend == "slurm" else ""
+    )
     config_path.write_text(
         f"""[run]
 directory = "{name}"
@@ -158,6 +161,7 @@ available_cpus = {concurrent * mpi_ranks * threads_per_rank}
 concurrent_evaluations = {concurrent}
 mpi_ranks = {mpi_ranks}
 threads_per_rank = {threads_per_rank}
+{memory_line}
 
 [[candidate]]
 id = "a"
@@ -824,6 +828,7 @@ def test_slurm_launches_quadratic_as_a_serial_stage(tmp_path, monkeypatch):
             "--ntasks=1",
             "--cpus-per-task=1",
             "--cpu-bind=cores",
+            "--mem=1536M",
             *case_from_name("quadratic")
             .evaluation_plan(
                 candidate,
@@ -897,6 +902,7 @@ def test_slurm_launches_each_stage_with_its_resource_shape(
             "--ntasks=1",
             "--cpus-per-task=1",
             "--cpu-bind=cores",
+            "--mem=1536M",
             "prepare-command",
         ],
         [
@@ -906,6 +912,7 @@ def test_slurm_launches_each_stage_with_its_resource_shape(
             "--ntasks=2",
             "--cpus-per-task=3",
             "--cpu-bind=cores",
+            "--mem=1536M",
             "--mpi=pmix",
             "solver-command",
             str(config.run_dir / "evaluations" / "a" / "result.json"),
@@ -1291,6 +1298,7 @@ def test_parallel_initialization_uses_slurm_backend(tmp_path, monkeypatch):
                     "--ntasks=1",
                     "--cpus-per-task=1",
                     "--cpu-bind=cores",
+                    "--mem=1536M",
                 ],
             }
     finally:

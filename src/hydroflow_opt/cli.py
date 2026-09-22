@@ -24,6 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser.add_argument("run_dir", type=Path)
     resume_parser = subparsers.add_parser("resume")
     resume_parser.add_argument("run_dir", type=Path)
+    resume_parser.add_argument("--memory-mib-per-evaluation", type=int)
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -35,7 +36,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "resume":
-        summary = resume_optimization(args.run_dir)
+        summary = resume_optimization(
+            args.run_dir,
+            memory_mib_per_evaluation=args.memory_mib_per_evaluation,
+        )
         print(
             f"run complete: {summary.succeeded}/{summary.total} succeeded, "
             f"results={summary.results_path}"
