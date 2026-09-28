@@ -21,6 +21,7 @@ variant = "baseline"
 
 [execution]
 backend = "local"                          # local or slurm; default: local
+# stage_timeout_seconds = 1800             # optional per-stage budget
 
 [resources]
 available_cpus = 4                         # default: 1
@@ -81,6 +82,34 @@ concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus islan
 | `hydroflow-opt resume RUN_DIR` | Continue a checkpointed optimization. |
 | `hydroflow-opt inspect RUN_DIR` | Print a completed run summary. |
 
+## Stage time limits
+
+Set an optional positive integer budget in seconds:
+
+```toml
+[execution]
+backend = "slurm"                  # also supported with "local"
+stage_timeout_seconds = 1800
+```
+
+The budget applies independently to every stage, including preparation and finalization. Omit it for no framework-imposed limit. Zero, negative values, booleans, strings, and fractional seconds are rejected. `1800` is an example, not an estimate of CFD runtime; choose a generous budget for your workload. There is no inactivity detection or automatic retry.
+
+With Slurm, each `srun` gets `--time` rounded **up to whole minutes** (61 seconds becomes two minutes). Slurm terminates the step on expiry using its configured termination grace and overtime policy. This bounds step execution, not waiting for resources. The outer `#SBATCH --time` still limits the whole allocation. A nonzero launcher exit records a failed evaluation; the Slurm stderr log contains the cause. An exit code alone is not classified as proof of a timeout.
+
+Locally, the budget starts when the stage process is launched. On expiry, hydroflow-opt sends `SIGTERM` to its process group, waits five seconds, then sends `SIGKILL` to remaining group members and reaps the launcher. This covers local MPI processes in the group; descendants that detach into another session group are outside this cleanup. Cleanup time is additional to the configured budget. The result explicitly reports the stage timeout.
+
+Stdout and stderr go directly to stage log files as the application emits them (application-level buffering can still delay output). Stage metadata records the configured budget. Failure skips remaining stages for that candidate, preserves diagnostics, and uses the existing optimization penalty so subsequent evaluations can continue.
+
+To check the cluster's step-timeout behavior, run this inside a small Slurm
+allocation with more than two minutes remaining:
+
+```bash
+srun --exclusive --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=256M --time=1 sleep 120 && exit 1
+srun --exclusive --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=256M true
+```
+
+The first step should report a time-limit failure after about one minute; the second should complete in the same allocation. Confirm `TIMEOUT` for the first step with `sacct`; a different failure needs investigation. Then run a small hydroflow-opt case with a representative budget before scaling up.
+
 ## Slurm memory budget
 
 Slurm configurations require an explicit positive integer under `[resources]`:
@@ -90,37 +119,18 @@ Slurm configurations require an explicit positive integer under `[resources]`:
 memory_mib_per_evaluation = 1536
 ```
 
-This is the total memory reservation in MiB for one stage across all its MPI
-processes, not memory per rank. Every stage requests the same budget through
-`srun --mem=1536M`, overriding inherited batch memory requests. Since stages
-within an evaluation run sequentially, their reservations are not summed.
-Local execution accepts and records this setting but does not enforce it.
+This is the total memory reservation in MiB for one stage across all its MPI processes, not memory per ran. Every stage requests the same budget through `srun --mem=1536M`, overriding inherited batch memory requests. Since stages within an evaluation run sequentially, their reservations are not summed. Local execution accepts and records this setting but does not enforce it.
 
-`1536` is a trial value, not a measured requirement for every design. Budget
-for the largest stage and leave headroom for Python workers and scheduler
-processes. For example, 32 simultaneous stages at 1536 MiB reserve 48 GiB on
-a node allocated 64 GiB. `#SBATCH --mem` still specifies memory **per node**.
+`1536` is a trial value, not a measured requirement for every design. Budget for the largest stage and leave headroom for Python workers and scheduler processes. For example, 32 simultaneous stages at 1536 MiB reserve 48 GiB on a node allocated 64 GiB. `#SBATCH --mem` still specifies memory **per node**.
 
-When positive numeric `SLURM_MEM_PER_NODE` and node counts are available,
-hydroflow-opt checks `nodes * floor(memory_per_node / budget)` against
-`concurrent_evaluations` before starting workers. Unknown or zero-valued
-allocation information skips this check. Passing it does not guarantee CPU
-placement or sufficient memory headroom; normal scheduling waits can remain.
+When positive numeric `SLURM_MEM_PER_NODE` and node counts are available, hydroflow-opt checks `nodes * floor(memory_per_node / budget)` against `concurrent_evaluations` before starting workers. Unknown or zero-valued allocation information skips this check. Passing it does not guarantee CPU placement or sufficient memory headroom; normal scheduling waits can remain.
 
-Older Slurm TOMLs must add the field. Resume reads its saved configuration,
-not the original TOML; supply or change its budget with:
+Older Slurm TOMLs must add the field. Resume reads its saved configuration, not the original TOML; supply or change its budget with:
 
 ```bash
 hydroflow-opt resume runs/tistos-64 --memory-mib-per-evaluation 1536
 ```
 
-The override is Slurm-only, validated before persisting, and saved atomically
-with an updated configuration hash and provenance recording the old/new budgets
-and previous hash. Later resumes use the saved value. Completed outcomes remain
-reusable; interrupted evaluations rerun, while previously recorded failed
-outcomes retain the existing reuse behavior. Completed runs remain a no-op.
+The override is Slurm-only, validated before persisting, and saved atomically with an updated configuration hash and provenance recording the old/new budgets and previous hash. Later resumes use the saved value. Completed outcomes remain reusable; interrupted evaluations rerun, while previously recorded failed outcomes retain the existing reuse behavior. Completed runs remain a no-op.
 
-Before scaling up, run two islands on one node with adequate CPUs and memory.
-Use `sacct` to verify overlapping steps with the configured memory reservation,
-and check memory usage and failures before increasing concurrency. Stage timings
-still include time spent waiting for Slurm to launch the step.
+Before scaling up, run two islands on one node with adequate CPUs and memory. Use `sacct` to verify overlapping steps with the configured memory reservation, and check memory usage and failures before increasing concurrency. Stage timings still include time spent waiting for Slurm to launch the step.

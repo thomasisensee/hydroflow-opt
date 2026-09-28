@@ -115,7 +115,9 @@ srun --exclusive --nodes=1 --ntasks=2 --cpus-per-task=1 \
   --cpu-bind=cores --mem=1536M --mpi=pmix
 ```
 
-This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node. In a single-node allocation, `${TMPDIR}` can place simulation cases on fast node-local storage. Hydroflow-opt rejects `${TMPDIR}` scratch in a multi-node allocation because successive stages may run on different nodes. Multi-node allocations require a scratch directory visible from every allocated node. Partition, time limit, node count, and total allocation size remain properties of the outer Slurm job.
+This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node. In a single-node allocation, `${TMPDIR}` can place simulation cases on fast node-local storage. Hydroflow-opt rejects `${TMPDIR}` scratch in a multi-node allocation because successive stages may run on different nodes. Multi-node allocations require a scratch directory visible from every allocated node. Partition, allocation time limit, node count, and total allocation size remain properties of the outer Slurm job.
+
+Set optional `execution.stage_timeout_seconds` to bound each stage independently and let optimization continue after an over-budget evaluation fails. Slurm enforces the limit on each job step; local execution terminates the stage's process group. Omit the setting to keep execution unlimited by hydroflow-opt. See [stage time limits](doc/configuration.md#stage-time-limits) for timing and cleanup details.
 
 ## Optimize with islands
 

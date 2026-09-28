@@ -649,6 +649,8 @@ def test_failed_stage_stops_plan_and_records_diagnostics(
 
     def fake_run(command, **kwargs):
         commands.append(command)
+        kwargs["stdout"].write("partial")
+        kwargs["stderr"].write("boom")
         return subprocess.CompletedProcess(command, 7, "partial", "boom")
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -810,7 +812,8 @@ def test_slurm_launches_quadratic_as_a_serial_stage(tmp_path, monkeypatch):
             ),
             encoding="utf-8",
         )
-        return subprocess.CompletedProcess(command, 0, "worker out", "")
+        kwargs["stdout"].write("worker out")
+        return subprocess.CompletedProcess(command, 0, None, None)
 
     monkeypatch.setenv("SLURM_JOB_ID", "456")
     monkeypatch.setattr(
