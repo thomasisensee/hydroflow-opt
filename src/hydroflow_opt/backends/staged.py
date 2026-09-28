@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from hydroflow_opt.cases import CasePlugin
 from hydroflow_opt.config import FlowOptConfig
@@ -34,6 +34,7 @@ class _StageRun:
     returncode: int | None
     duration_seconds: float
     error: str | None = None
+    timed_out: bool = False
 
 
 class StagedBackend(ABC):
@@ -73,6 +74,15 @@ class StagedBackend(ABC):
             )
             run = self._run_stage(stage, stage_dir)
             timings[stage.name] = run.duration_seconds
+            if run.timed_out:
+                return self._failed_result(
+                    candidate,
+                    paths,
+                    timings,
+                    f"stage '{stage.name}' exceeded time limit of "
+                    f"{self.config.execution.stage_timeout_seconds} seconds",
+                    stage.name,
+                )
             if run.error is not None:
                 return self._failed_result(
                     candidate,
@@ -148,7 +158,7 @@ class StagedBackend(ABC):
                 "run_dir": str(self.config.run_dir),
                 "scratch_dir": str(paths.scratch_dir),
                 "resources": asdict(self.config.resources),
-                "execution": {"backend": self.config.execution.backend.value},
+                "execution": self.config.execution.as_dict(),
                 "optimization": asdict(context) if context else None,
             },
         }
@@ -199,29 +209,26 @@ class StagedBackend(ABC):
         )
         started_at = datetime.now(UTC).isoformat()
         started = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                command,
-                check=False,
-                cwd=stage.working_directory,
-                env=environment,
-                capture_output=True,
-                text=True,
-            )
-        except OSError as exc:
-            duration = time.perf_counter() - started
-            (stage_dir / "stdout.log").write_text("", encoding="utf-8")
-            (stage_dir / "stderr.log").write_text(str(exc), encoding="utf-8")
-            run = _StageRun(None, duration, str(exc))
-        else:
-            duration = time.perf_counter() - started
-            (stage_dir / "stdout.log").write_text(
-                completed.stdout, encoding="utf-8"
-            )
-            (stage_dir / "stderr.log").write_text(
-                completed.stderr, encoding="utf-8"
-            )
-            run = _StageRun(completed.returncode, duration)
+        with (
+            (stage_dir / "stdout.log").open("w", encoding="utf-8") as stdout,
+            (stage_dir / "stderr.log").open("w", encoding="utf-8") as stderr,
+        ):
+            try:
+                returncode = self._execute_stage(
+                    command, stage, environment, stdout, stderr
+                )
+            except subprocess.TimeoutExpired:
+                run = _StageRun(
+                    None,
+                    time.perf_counter() - started,
+                    "stage time limit exceeded",
+                    timed_out=True,
+                )
+            except OSError as exc:
+                stderr.write(str(exc))
+                run = _StageRun(None, time.perf_counter() - started, str(exc))
+            else:
+                run = _StageRun(returncode, time.perf_counter() - started)
         metadata = {
             "name": stage.name,
             "command": list(stage.command),
@@ -233,10 +240,34 @@ class StagedBackend(ABC):
             "returncode": run.returncode,
             "error": run.error,
         }
+        if self.config.execution.stage_timeout_seconds is not None:
+            metadata["stage_timeout_seconds"] = (
+                self.config.execution.stage_timeout_seconds
+            )
+        if run.timed_out:
+            metadata["timed_out"] = True
         (stage_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
         )
         return run
+
+    def _execute_stage(
+        self,
+        command: list[str],
+        stage: EvaluationStage,
+        environment: dict[str, str],
+        stdout: TextIO,
+        stderr: TextIO,
+    ) -> int:
+        """Wait for the launcher while writing output directly to files."""
+        return subprocess.run(
+            command,
+            check=False,
+            cwd=stage.working_directory,
+            env=environment,
+            stdout=stdout,
+            stderr=stderr,
+        ).returncode
 
     def _failed_result(
         self,

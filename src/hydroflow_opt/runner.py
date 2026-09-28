@@ -695,7 +695,7 @@ def _effective_config(config: FlowOptConfig) -> dict[str, Any]:
         "case_name": config.case_name,
         "case_options": config.case_options,
         "resources": asdict(config.resources),
-        "execution": {"backend": config.execution.backend.value},
+        "execution": config.execution.as_dict(),
         "optimization": asdict(config.optimization),
     }
 
@@ -722,7 +722,10 @@ def _config_from_manifest(run_dir: Path, raw: dict[str, Any]) -> FlowOptConfig:
         execution=ExecutionConfig(
             backend=BackendKind(
                 raw.get("execution", {}).get("backend", "local")
-            )
+            ),
+            stage_timeout_seconds=raw.get("execution", {}).get(
+                "stage_timeout_seconds"
+            ),
         ),
         optimization=OptimizationConfig(**raw["optimization"]),
         scratch_dir_template=template,

@@ -16,6 +16,24 @@ class ExecutionConfig:
     """Selection of the mechanism used to launch case workers."""
 
     backend: BackendKind = BackendKind.LOCAL
+    stage_timeout_seconds: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the optional per-stage time budget."""
+        value = self.stage_timeout_seconds
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(
+                "execution.stage_timeout_seconds must be a positive integer"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize settings without changing legacy unlimited requests."""
+        result: dict[str, Any] = {"backend": self.backend.value}
+        if self.stage_timeout_seconds is not None:
+            result["stage_timeout_seconds"] = self.stage_timeout_seconds
+        return result
 
 
 @dataclass(frozen=True)
@@ -184,7 +202,10 @@ def _parse_execution(raw: dict[str, Any]) -> ExecutionConfig:
         raise ValueError(
             f"'execution.backend' must be one of: {choices}"
         ) from exc
-    return ExecutionConfig(backend=backend)
+    return ExecutionConfig(
+        backend=backend,
+        stage_timeout_seconds=raw.get("stage_timeout_seconds"),
+    )
 
 
 def _parse_optimization(raw: Any, base_dir: Path) -> OptimizationConfig | None:

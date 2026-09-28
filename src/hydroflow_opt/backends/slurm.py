@@ -79,6 +79,9 @@ class SlurmBackend(StagedBackend):
             "--cpu-bind=cores",
             f"--mem={self.config.resources.memory_mib_per_evaluation}M",
         ]
+        timeout = self.config.execution.stage_timeout_seconds
+        if timeout is not None:
+            command.append(f"--time={(timeout + 59) // 60}")
         if resources.processes > 1:
             command.append("--mpi=pmix")
         return [*command, *stage.command]
