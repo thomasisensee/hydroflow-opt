@@ -121,7 +121,13 @@ def load_config(
     with config_path.open("rb") as stream:
         raw = tomllib.load(stream)
 
-    base_dir = config_path.parent
+    return _parse_config(raw, config_path.parent, resolve_scratch)
+
+
+def _parse_config(
+    raw: dict[str, Any], base_dir: Path, resolve_scratch: bool = True
+) -> FlowOptConfig:
+    """Validate config data independently of its on-disk representation."""
     run = _expect_table(raw, "run")
     case = _expect_table(raw, "case")
     resources = _expect_optional_table(raw, "resources")

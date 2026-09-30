@@ -25,7 +25,23 @@ def main(argv: list[str] | None = None) -> int:
     resume_parser = subparsers.add_parser("resume")
     resume_parser.add_argument("run_dir", type=Path)
     resume_parser.add_argument("--memory-mib-per-evaluation", type=int)
+    replay_parser = subparsers.add_parser(
+        "replay-config",
+        help="create a single-candidate TOML from request.json",
+    )
+    replay_parser.add_argument("request", type=Path)
+    replay_parser.add_argument("output", type=Path)
     args = parser.parse_args(argv)
+
+    if args.command == "replay-config":
+        from hydroflow_opt.replay import create_replay_config
+
+        try:
+            output = create_replay_config(args.request, args.output)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(f"replay configuration written: {output}")
+        return 0
 
     if args.command == "inspect":
         summary = inspect_run(args.run_dir)

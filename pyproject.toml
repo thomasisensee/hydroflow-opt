@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     "numpy",
     "pygmo>=2.19.8",
+    "tomlkit>=0.15.1",
 ]
 
 [project.optional-dependencies]
