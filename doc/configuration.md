@@ -77,10 +77,32 @@ concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus islan
 | Command | Purpose |
 |---|---|
 | `hydroflow-opt check CONFIG` | Parse configuration and resolve the case plugin. |
+| `hydroflow-opt replay-config REQUEST OUTPUT` | Generate an editable single-candidate TOML from `request.json`. |
 | `hydroflow-opt run CONFIG` | Evaluate explicit candidates. |
 | `hydroflow-opt optimize CONFIG` | Start a new optimization. |
 | `hydroflow-opt resume RUN_DIR` | Continue a checkpointed optimization. |
 | `hydroflow-opt inspect RUN_DIR` | Print a completed run summary. |
+
+## Debugging a saved candidate
+
+Use the evaluation's `request.json` to generate a new single-candidate config:
+
+```bash
+hydroflow-opt replay-config <path-to-run-directory>/request.json debug-001.toml
+hydroflow-opt check debug-001.toml
+# With the case environment and, for Slurm, a suitable allocation:
+hydroflow-opt run debug-001.toml
+```
+
+The helper copies the candidate ID and all parameters, case options, execution backend and stage timeout. It retains MPI ranks, threads per rank, and memory budget, but sets `concurrent_evaluations = 1` and reduces `available_cpus` to `mpi_ranks * threads_per_rank`. Optimization settings are omitted.
+
+The filename determines the run-directory name. An existing output file or populated destination run directory is rejected; choose another filename for another attempt. Generating the TOML does not create the run directory, load the case plugin, or start any simulation.
+
+Review and edit the TOML before execution. For serial debugging, set `mpi_ranks = 1` and adjust `available_cpus` to `threads_per_rank`. Slurm runs still need a batch allocation sized for the resulting resources. Case option values are copied literally, so any cluster-specific or relative paths in those values may need editing when moving to another environment.
+
+Legacy requests without execution settings default to local execution. Slurm requests must contain a memory budget; the helper does not guess one. Values that TOML cannot represent (for example JSON null in case options) produce an error rather than being silently removed.
+
+`run` executes the entire workflow, including mesh generation. To reuse a saved mesh for solver-only debugging, run the solver directly in a separate copy of the saved case. Matching terminal results, including failures, are cached if the same generated run is executed again; generate a new TOML with a different filename for a fresh attempt.
 
 ## Stage time limits
 

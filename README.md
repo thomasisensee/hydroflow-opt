@@ -64,9 +64,17 @@ concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus
 
 ## Execute candidates with Slurm
 
-Local subprocess execution is the default. One-process stages run directly;
-multi-process stages use `mpiexec`. To launch stages as Slurm job steps,
-select the backend explicitly:
+To debug a candidate from a previous run, generate a standalone configuration:
+
+```bash
+hydroflow-opt replay-config runs/example/evaluations/candidate-id/request.json debug.toml
+hydroflow-opt check debug.toml
+hydroflow-opt run debug.toml
+```
+
+This preserves the saved candidate and case settings, reduces concurrency to one evaluation, and uses fresh paths based on the TOML filename. Review the generated execution/resources settings and activate the case environment before running; Slurm still requires an allocation. See [replay configuration](doc/configuration.md#debugging-a-saved-candidate).
+
+Local subprocess execution is the default. One-process stages run directly; multi-process stages use `mpiexec`. To launch stages as Slurm job steps, select the backend explicitly:
 
 ```toml
 [execution]
