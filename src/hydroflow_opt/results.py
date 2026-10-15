@@ -83,6 +83,13 @@ def archive_attempt(evaluation_dir: Path) -> None:
     destination = attempts_dir / f"attempt-{number + 1:04d}"
     destination.mkdir()
     for name in (
+        "placement.json",
+        "node-local-identity.json",
+        "diagnostics.tar.gz",
+        "diagnostics.json",
+        "cleanup.json",
+        "bootstrap.json",
+        "remote-operations",
         "evaluation.json",
         "outcome.json",
         "request.json",

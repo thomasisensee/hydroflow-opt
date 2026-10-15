@@ -2,9 +2,11 @@
 
 Paths are resolved relative to the TOML file. Unknown case-specific values can be placed below `[case.options]` and are passed to the plugin.
 
-`run.scratch_directory` additionally accepts `$NAME` and `${NAME}` environment-variable placeholders. Variables are resolved when `run`, `optimize`, or `resume` starts; unset or empty variables are errors. Use `$$` for a literal dollar sign. Shell expressions, command substitution, and defaults such as `${NAME:-value}` are not supported. A relative path after substitution remains relative to the original TOML file.
+`run.scratch_directory` additionally accepts `$NAME` and `${NAME}` environment-variable placeholders. In shared mode, variables are resolved when `run`, `optimize`, or `resume` starts; unset or empty variables are errors. Use `$$` for a literal dollar sign. Shell expressions, command substitution, and defaults such as `${NAME:-value}` are not supported. A relative path after substitution remains relative to the original TOML file.
 
 `hydroflow-opt check` validates the template without requiring its variables to be set, so configuration can be checked outside a batch allocation.
+
+`run.scratch_mode` accepts `shared` (default) or `node_local` (Slurm only). Node-local mode resolves scratch on the assigned node and supports multi-node allocations; see [node-local scratch](node-local-scratch.md) for configuration, resource requirements, diagnostics, and recovery.
 
 ## Explicit candidate run
 

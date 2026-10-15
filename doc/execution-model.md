@@ -47,7 +47,7 @@ srun --exclusive --nodes=1 \
   --cpu-bind=cores --mem=<memory_mib_per_evaluation>M [--mpi=pmix] <stage command>
 ```
 
-`--mpi=pmix` is added for multi-process stages. Successive stages may run on different nodes. A scratch template referencing `$TMPDIR` is therefore supported only when `SLURM_JOB_NUM_NODES` is exactly one; hydroflow-opt rejects it before creating run files otherwise. Multi-node allocations require scratch storage visible from every allocated node. Other environment-variable paths are allowed, and the user is responsible for ensuring that they provide the required visibility. Queue, wall-time, and allocation size remain properties of the outer Slurm job.
+`--mpi=pmix` is added for multi-process stages. In the default shared mode, successive stages may run on different nodes. A scratch template referencing `$TMPDIR` is therefore supported only when `SLURM_JOB_NUM_NODES` is exactly one; hydroflow-opt rejects it before creating run files otherwise. Multi-node allocations in shared mode require scratch storage visible from every allocated node. Other environment-variable paths are allowed, and the user is responsible for ensuring that they provide the required visibility. Queue, wall-time, and allocation size remain properties of the outer Slurm job.
 
 ## Failures and repeated evaluations
 
@@ -55,6 +55,8 @@ A stage that cannot start or exits nonzero stops the plan and produces a failed 
 
 If the same request already has a valid result, the backend reuses it. If an evaluation directory contains incompatible or invalid files, those files are moved to `attempts/attempt-NNNN/` before another attempt.
 
-All Slurm stages also receive `--mem=<memory_mib_per_evaluation>M`. This
-required evaluation budget overrides inherited batch memory reservations;
-see [configuration](configuration.md#slurm-memory-budget).
+All Slurm stages also receive `--mem=<memory_mib_per_evaluation>M`. This required evaluation budget overrides inherited batch memory reservations. See [configuration](configuration.md#slurm-memory-budget).
+
+## Node-local placement
+
+With `run.scratch_mode = "node_local"`, a process-shared coordinator leases a node for each complete candidate evaluation. Every stage is pinned there, and scratch is created remotely beneath `$TMPDIR`. See [node-local scratch](node-local-scratch.md) for setup and cluster acceptance.
