@@ -53,7 +53,7 @@ class StagedBackend(ABC):
         """Execute a case plan and normalize its terminal result."""
         paths = self._evaluation_paths(candidate)
         paths.evaluation_dir.mkdir(parents=True, exist_ok=True)
-        paths.scratch_dir.mkdir(parents=True, exist_ok=True)
+        self._prepare_scratch(paths)
         request = self._request(candidate, context, paths)
         cached = self._cached_result(request, paths)
         if cached is not None:
@@ -121,6 +121,9 @@ class StagedBackend(ABC):
         normalized = _with_timings(result, timings)
         write_result(paths.result_path, normalized)
         return normalized
+
+    def _prepare_scratch(self, paths: EvaluationPaths) -> None:
+        paths.scratch_dir.mkdir(parents=True, exist_ok=True)
 
     @abstractmethod
     def launch_command(self, stage: EvaluationStage) -> list[str]:

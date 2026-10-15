@@ -29,7 +29,7 @@ scratch-directory/
 
 Plugins decide which case files remain after success. Failed evaluations should normally retain diagnostic files.
 
-When the scratch root uses node-local storage such as `$TMPDIR`, its contents normally disappear after the allocation. Structured results, outcomes, metadata, and logs from completed stages remain in the persistent run directory. Hydroflow-opt does not copy complete failed simulation cases back automatically. Because stage output is captured and written after the command exits, output from a stage interrupted by allocation termination may also be unavailable.
+When the scratch root uses node-local storage such as `$TMPDIR`, its contents normally disappear after the allocation. Structured results, outcomes, metadata, and logs from completed stages remain in the persistent run directory. Hydroflow-opt does not copy complete failed simulation cases back automatically. Stage stdout/stderr stream to shared files; abrupt allocation termination can still lose buffered output. With `scratch_mode = "node_local"`, failed-case logs and configuration are exported as bounded diagnostic archives; see [node-local scratch](node-local-scratch.md).
 
 ## Evaluation files
 
@@ -68,4 +68,6 @@ run-directory/
     └── champions.json
 ```
 
-`manifest.json` stores the effective configuration, parameter space, provenance, evaluation identifiers, and completion status. Scratch-directory templates are stored without allocation-specific expansion, while every start or resume provenance entry records the concrete path used. A resumed run therefore resolves variables such as `$TMPDIR` again for its new allocation. `checkpoint.json` is the authoritative resume state.
+`manifest.json` stores the effective configuration, parameter space, provenance, evaluation identifiers, and completion status. Scratch-directory templates are stored without allocation-specific expansion, while shared-mode start/resume provenance records the concrete path used. In node-local mode, concrete paths and hostnames live in per-evaluation `placement.json` and stage metadata instead. A resumed run therefore resolves variables such as `$TMPDIR` again for its new allocation. `checkpoint.json` is the authoritative resume state.
+
+In node-local mode the scratch layout is `<remote-root>/<invocation-id>/<candidate-id>/<attempt-id>/`. `execution-sessions/<invocation-id>/token` in the shared run directory verifies visibility during remote bootstrap; it contains no coordinator credentials.

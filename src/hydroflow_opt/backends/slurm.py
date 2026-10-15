@@ -10,7 +10,7 @@ from hydroflow_opt.config import (
     FlowOptConfig,
     scratch_directory_variables,
 )
-from hydroflow_opt.models import EvaluationStage
+from hydroflow_opt.models import EvaluationPaths, EvaluationStage
 
 
 class SlurmBackend(StagedBackend):
@@ -28,8 +28,10 @@ class SlurmBackend(StagedBackend):
             raise RuntimeError(
                 "Slurm execution requires the 'srun' executable on PATH"
             )
-        if config is not None and "TMPDIR" in scratch_directory_variables(
-            config
+        if (
+            config is not None
+            and config.scratch_mode != "node_local"
+            and "TMPDIR" in scratch_directory_variables(config)
         ):
             raw_nodes = os.environ.get(
                 "SLURM_JOB_NUM_NODES", os.environ.get("SLURM_NNODES")
@@ -65,6 +67,14 @@ class SlurmBackend(StagedBackend):
                             f"concurrent evaluations at {memory} MiB each; "
                             "request more memory or reduce concurrency/budget"
                         )
+
+    def _prepare_scratch(self, paths: EvaluationPaths) -> None:
+        if self.config.scratch_mode == "node_local":
+            raise RuntimeError(
+                "node_local scratch requires a node_local_session; "
+                "use the runner functions to manage it"
+            )
+        super()._prepare_scratch(paths)
 
     def launch_command(self, stage: EvaluationStage) -> list[str]:
         """Translate a portable stage into an exclusive one-node job step."""

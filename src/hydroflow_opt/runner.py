@@ -76,6 +76,13 @@ def run_local(
     case = case_from_name(config.case_name)
     if backend is None:
         validate_execution_environment(config)
+    if backend is None and config.scratch_mode == "node_local":
+        from hydroflow_opt.backends.node_local import node_local_session
+
+        with node_local_session(config, case) as local_evaluator:
+            return run_local(
+                config, config_path=config_path, backend=local_evaluator
+            )
     evaluator = backend or backend_from_config(config, case)
     _prepare_run(config, config_path)
     from concurrent.futures import ThreadPoolExecutor
@@ -163,7 +170,11 @@ def resume_optimization(
     _validate_parameter_space(manifest["parameter_space"], space)
 
     provenance = _provenance(
-        case, _backend_name(config, backend), config.scratch_dir
+        case,
+        _backend_name(config, backend),
+        config.scratch_dir,
+        config.scratch_mode,
+        config.scratch_dir_template,
     )
     compatibility_warnings = _provenance_warnings(
         manifest["provenance"][-1], provenance
@@ -281,6 +292,13 @@ def _continue_optimization(
     pg: Any,
     backend: EvaluationBackend | None,
 ) -> RunSummary:
+    if backend is None and config.scratch_mode == "node_local":
+        from hydroflow_opt.backends.node_local import node_local_session
+
+        with node_local_session(
+            config, case_from_name(config.case_name)
+        ) as evaluator:
+            return _continue_optimization(config, manifest, pg, evaluator)
     optimization = config.optimization
     assert optimization is not None and optimization.seed is not None
     checkpoint = _load_checkpoint(config.run_dir, required=False)
@@ -645,7 +663,8 @@ def _snapshot_initial_population(config: FlowOptConfig) -> FlowOptConfig:
 
 def _prepare_run(config: FlowOptConfig, config_path: Path | None) -> None:
     config.run_dir.mkdir(parents=True, exist_ok=True)
-    config.scratch_dir.mkdir(parents=True, exist_ok=True)
+    if config.scratch_mode != "node_local":
+        config.scratch_dir.mkdir(parents=True, exist_ok=True)
     if config_path is not None:
         shutil.copy2(config_path, config.run_dir / "config.toml")
 
@@ -657,7 +676,13 @@ def _new_manifest(
     backend_name: str,
 ) -> dict[str, Any]:
     effective = _effective_config(config)
-    provenance = _provenance(case, backend_name, config.scratch_dir)
+    provenance = _provenance(
+        case,
+        backend_name,
+        config.scratch_dir,
+        config.scratch_mode,
+        config.scratch_dir_template,
+    )
     provenance["started_at"] = _now()
     return {
         "schema_version": _MANIFEST_SCHEMA,
@@ -683,7 +708,11 @@ def _effective_config(config: FlowOptConfig) -> dict[str, Any]:
     scratch_template = config.scratch_dir_template
     scratch_base = config.scratch_dir_base
     if scratch_template is None:
-        scratch_template = str(config.scratch_dir.resolve())
+        scratch_template = (
+            str(config.scratch_dir)
+            if config.scratch_mode == "node_local"
+            else str(config.scratch_dir.resolve())
+        )
     return {
         "run_dir": str(config.run_dir.resolve()),
         "scratch_directory": {
@@ -692,6 +721,11 @@ def _effective_config(config: FlowOptConfig) -> dict[str, Any]:
                 str(scratch_base.resolve()) if scratch_base else None
             ),
         },
+        **(
+            {"scratch_mode": config.scratch_mode}
+            if config.scratch_mode != "shared"
+            else {}
+        ),
         "case_name": config.case_name,
         "case_options": config.case_options,
         "resources": asdict(config.resources),
@@ -730,17 +764,32 @@ def _config_from_manifest(run_dir: Path, raw: dict[str, Any]) -> FlowOptConfig:
         optimization=OptimizationConfig(**raw["optimization"]),
         scratch_dir_template=template,
         scratch_dir_base=scratch_base,
+        scratch_mode=raw.get("scratch_mode", "shared"),
     )
 
 
 def _provenance(
-    case: CasePlugin, backend_name: str, scratch_dir: Path
+    case: CasePlugin,
+    backend_name: str,
+    scratch_dir: Path,
+    scratch_mode: str = "shared",
+    scratch_template: str | None = None,
 ) -> dict[str, Any]:
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "execution_backend": backend_name,
-        "scratch_directory": str(scratch_dir.resolve()),
+        "scratch_directory": (
+            str(scratch_dir.resolve()) if scratch_mode == "shared" else None
+        ),
+        **(
+            {
+                "scratch_mode": scratch_mode,
+                "scratch_template": scratch_template,
+            }
+            if scratch_mode == "node_local"
+            else {}
+        ),
         "packages": {
             "hydroflow_opt": _package_version("hydroflow_opt"),
             "pygmo": _package_version("pygmo"),

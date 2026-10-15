@@ -96,9 +96,17 @@ class FlowOptConfig:
     optimization: OptimizationConfig | None = None
     scratch_dir_template: str | None = field(default=None, repr=False)
     scratch_dir_base: Path | None = field(default=None, repr=False)
+    scratch_mode: str = "shared"
 
     def __post_init__(self) -> None:
         """Require an explicit memory reservation for Slurm steps."""
+        if self.scratch_mode not in ("shared", "node_local"):
+            raise ValueError("run.scratch_mode must be shared or node_local")
+        if (
+            self.scratch_mode == "node_local"
+            and self.execution.backend is not BackendKind.SLURM
+        ):
+            raise ValueError("node_local scratch requires the Slurm backend")
         if (
             self.execution.backend is BackendKind.SLURM
             and self.resources.memory_mib_per_evaluation is None
@@ -137,13 +145,21 @@ def _parse_config(
         raise ValueError("'case.options' must be a TOML table")
 
     run_dir = _resolve_path(base_dir, _expect_str(run, "directory"))
-    scratch_value = run.get("scratch_directory", str(run_dir / "scratch"))
+    scratch_mode = run.get("scratch_mode", "shared")
+    if scratch_mode not in ("shared", "node_local"):
+        raise ValueError("run.scratch_mode must be shared or node_local")
+    scratch_default = (
+        "${TMPDIR}/hydroflow-opt"
+        if scratch_mode == "node_local"
+        else str(run_dir / "scratch")
+    )
+    scratch_value = run.get("scratch_directory", scratch_default)
     if not isinstance(scratch_value, str) or not scratch_value:
         raise ValueError("'run.scratch_directory' must be a non-empty string")
     _validate_scratch_template(scratch_value)
     scratch_dir = (
         _resolve_scratch_template(scratch_value, base_dir)
-        if resolve_scratch
+        if resolve_scratch and scratch_mode != "node_local"
         else _resolve_path(base_dir, scratch_value)
     )
     return FlowOptConfig(
@@ -171,6 +187,7 @@ def _parse_config(
         optimization=_parse_optimization(raw.get("optimization"), base_dir),
         scratch_dir_template=scratch_value,
         scratch_dir_base=base_dir,
+        scratch_mode=scratch_mode,
     )
 
 
@@ -179,7 +196,10 @@ def resolve_runtime_config(
     environment: Mapping[str, str] | None = None,
 ) -> FlowOptConfig:
     """Resolve allocation-specific scratch variables for one invocation."""
-    if config.scratch_dir_template is None:
+    if (
+        config.scratch_mode == "node_local"
+        or config.scratch_dir_template is None
+    ):
         return config
     base_dir = config.scratch_dir_base or Path.cwd()
     scratch_dir = _resolve_scratch_template(
