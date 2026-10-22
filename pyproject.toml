@@ -59,7 +59,7 @@ hydroflow-opt = "hydroflow_opt.cli:main"
 
 [project.urls]
 repository = "https://github.com/thomasisensee/hydroflow-opt"
-
+documentation = "https://hydroflow-opt.readthedocs.io"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hydroflow_opt"]
