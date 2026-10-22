@@ -2,13 +2,11 @@
 
 import json
 import sys
-import time
 from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
     """Evaluate a request written by :class:`SubprocessBackend`."""
-
     args = argv if argv is not None else sys.argv[1:]
     if len(args) != 2:
         raise SystemExit(
@@ -16,7 +14,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     request_path, result_path = (Path(value) for value in args)
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    start = time.perf_counter()
     objective = sum(
         float(value) ** 2
         for value in request["candidate"]["parameters"].values()
@@ -25,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
         "candidate_id": request["candidate"]["id"],
         "status": "success",
         "objective": objective,
-        "timings": {"evaluation": time.perf_counter() - start},
+        "timings": {},
         "metadata": {},
         "error": None,
     }

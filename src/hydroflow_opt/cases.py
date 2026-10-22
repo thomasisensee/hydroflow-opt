@@ -1,11 +1,17 @@
-"""Case discovery and the subprocess-worker case contract."""
+"""Case discovery and the staged-evaluation case contract."""
 
 import sys
 from importlib import metadata
-from pathlib import Path
 from typing import Any, Protocol, cast
 
-from hydroflow_opt.models import ParameterSpace
+from hydroflow_opt.models import (
+    Candidate,
+    EvaluationPaths,
+    EvaluationPlan,
+    EvaluationStage,
+    ParameterSpace,
+    ResourceRequest,
+)
 
 
 class CasePlugin(Protocol):
@@ -14,18 +20,20 @@ class CasePlugin(Protocol):
     def parameter_space(self, options: dict[str, Any]) -> ParameterSpace:
         """Return the named numerical space optimized by pygmo."""
 
-    def worker_command(
+    def evaluation_plan(
         self,
-        request_path: Path,
-        result_path: Path,
-    ) -> list[str]:
-        """Return the isolated worker command for one evaluation."""
+        candidate: Candidate,
+        paths: EvaluationPaths,
+        resources: ResourceRequest,
+    ) -> EvaluationPlan:
+        """Return ordered, backend-neutral commands for one evaluation."""
 
 
 class QuadraticCase:
     """Portable built-in case used by examples and tests."""
 
     def parameter_space(self, options: dict[str, Any]) -> ParameterSpace:
+        """Return configurable names with fixed quadratic bounds."""
         names = tuple(
             str(name) for name in options.get("parameters", ("x", "y"))
         )
@@ -35,23 +43,33 @@ class QuadraticCase:
             upper_bounds=tuple(5.0 for _ in names),
         )
 
-    def worker_command(
+    def evaluation_plan(
         self,
-        request_path: Path,
-        result_path: Path,
-    ) -> list[str]:
-        return [
-            sys.executable,
-            "-m",
-            "hydroflow_opt.toy_worker",
-            str(request_path),
-            str(result_path),
-        ]
+        candidate: Candidate,
+        paths: EvaluationPaths,
+        resources: ResourceRequest,
+    ) -> EvaluationPlan:
+        """Return the single-stage quadratic evaluation plan."""
+        del candidate, resources
+        return EvaluationPlan(
+            stages=(
+                EvaluationStage(
+                    name="evaluate",
+                    command=(
+                        sys.executable,
+                        "-m",
+                        "hydroflow_opt.toy_worker",
+                        str(paths.request_path),
+                        str(paths.result_path),
+                    ),
+                    working_directory=paths.evaluation_dir,
+                ),
+            )
+        )
 
 
 def case_from_name(name: str) -> CasePlugin:
     """Load a built-in case or a case registered by an installed package."""
-
     if name == "quadratic":
         return QuadraticCase()
 
@@ -60,14 +78,14 @@ def case_from_name(name: str) -> CasePlugin:
         if entry.name != name:
             continue
         loaded = entry.load()
-        if isinstance(loaded, type):
-            plugin = loaded()
-        elif callable(loaded) and not hasattr(loaded, "parameter_space"):
+        if isinstance(loaded, type) or (
+            callable(loaded) and not hasattr(loaded, "parameter_space")
+        ):
             plugin = loaded()
         else:
             plugin = loaded
         if not hasattr(plugin, "parameter_space") or not hasattr(
-            plugin, "worker_command"
+            plugin, "evaluation_plan"
         ):
             raise TypeError(
                 f"case plugin '{name}' does not implement the case contract"

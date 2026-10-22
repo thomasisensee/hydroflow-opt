@@ -2,29 +2,49 @@
 
 import hashlib
 import json
+import math
 import os
 import platform
+import random
 import secrets
 import shutil
-import subprocess
-import threading
 import uuid
 import warnings
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from hydroflow_opt.backends import (
+    SubprocessBackend as SubprocessBackend,
+)
+from hydroflow_opt.backends import (
+    backend_from_config,
+    validate_execution_environment,
+)
 from hydroflow_opt.cases import CasePlugin, case_from_name
-from hydroflow_opt.config import FlowOptConfig, OptimizationConfig
+from hydroflow_opt.config import (
+    ExecutionConfig,
+    FlowOptConfig,
+    OptimizationConfig,
+    resolve_runtime_config,
+)
 from hydroflow_opt.models import (
+    BackendKind,
     Candidate,
     EvaluationBackend,
     EvaluationContext,
     EvaluationResult,
     EvaluationStatus,
     ResourceRequest,
+)
+from hydroflow_opt.results import (
+    archive_attempt,
+    result_from_json,
+    result_to_json,
+    write_result,
 )
 
 _MANIFEST_SCHEMA = 1
@@ -43,119 +63,6 @@ class RunSummary:
     summary_path: Path
 
 
-class SubprocessBackend:
-    """Run isolated case workers within a fixed resource budget."""
-
-    def __init__(self, config: FlowOptConfig, case: CasePlugin) -> None:
-        self.config = config
-        self.case = case
-        self._slots = threading.BoundedSemaphore(
-            config.resources.concurrent_evaluations
-        )
-
-    def evaluate(
-        self,
-        candidate: Candidate,
-        context: EvaluationContext | None = None,
-    ) -> EvaluationResult:
-        """Run one worker and convert worker/protocol errors to results."""
-
-        evaluation_dir = self.config.run_dir / "evaluations" / candidate.id
-        scratch_dir = self.config.scratch_dir / candidate.id
-        evaluation_dir.mkdir(parents=True, exist_ok=True)
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-        request_path = evaluation_dir / "request.json"
-        result_path = evaluation_dir / "result.json"
-        request = {
-            "candidate": asdict(candidate),
-            "case": {
-                "name": self.config.case_name,
-                "options": self.config.case_options,
-            },
-            "context": {
-                "run_dir": str(self.config.run_dir),
-                "scratch_dir": str(scratch_dir),
-                "resources": asdict(self.config.resources),
-                "optimization": asdict(context) if context else None,
-            },
-        }
-        cached = self._cached_result(
-            request, request_path, result_path, evaluation_dir
-        )
-        if cached is not None:
-            return cached
-
-        request_path.write_text(
-            json.dumps(request, indent=2) + "\n", encoding="utf-8"
-        )
-        environment = os.environ.copy()
-        environment["OMP_NUM_THREADS"] = str(
-            self.config.resources.threads_per_rank
-        )
-        with self._slots:
-            completed = subprocess.run(
-                self.case.worker_command(request_path, result_path),
-                check=False,
-                cwd=evaluation_dir,
-                env=environment,
-                capture_output=True,
-                text=True,
-            )
-        (evaluation_dir / "stdout.log").write_text(
-            completed.stdout, encoding="utf-8"
-        )
-        (evaluation_dir / "stderr.log").write_text(
-            completed.stderr, encoding="utf-8"
-        )
-        if completed.returncode != 0:
-            result = EvaluationResult.failed(
-                candidate.id,
-                f"worker exited with status {completed.returncode}",
-                metadata={"evaluation_dir": str(evaluation_dir)},
-            )
-            _write_result(result_path, result)
-            return result
-        try:
-            raw = json.loads(result_path.read_text(encoding="utf-8"))
-            return _result_from_json(raw, candidate.id, evaluation_dir)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            result = EvaluationResult.failed(
-                candidate.id,
-                f"invalid worker result: {exc}",
-                metadata={"evaluation_dir": str(evaluation_dir)},
-            )
-            _write_result(result_path, result)
-            return result
-
-    def _cached_result(
-        self,
-        request: dict[str, Any],
-        request_path: Path,
-        result_path: Path,
-        evaluation_dir: Path,
-    ) -> EvaluationResult | None:
-        if not request_path.exists():
-            return None
-        try:
-            previous_request = json.loads(
-                request_path.read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError, json.JSONDecodeError):
-            _archive_attempt(evaluation_dir)
-            return None
-        if previous_request != request:
-            _archive_attempt(evaluation_dir)
-            return None
-        try:
-            raw = json.loads(result_path.read_text(encoding="utf-8"))
-            return _result_from_json(
-                raw, str(request["candidate"]["id"]), evaluation_dir
-            )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            _archive_attempt(evaluation_dir)
-            return None
-
-
 def run_local(
     config: FlowOptConfig,
     *,
@@ -163,13 +70,21 @@ def run_local(
     backend: EvaluationBackend | None = None,
 ) -> RunSummary:
     """Evaluate explicit candidates with the configured isolated worker."""
-
+    config = resolve_runtime_config(config)
     if not config.candidates:
         raise ValueError("'run' requires at least one [[candidate]] entry")
+    case = case_from_name(config.case_name)
+    if backend is None:
+        validate_execution_environment(config)
+    if backend is None and config.scratch_mode == "node_local":
+        from hydroflow_opt.backends.node_local import node_local_session
+
+        with node_local_session(config, case) as local_evaluator:
+            return run_local(
+                config, config_path=config_path, backend=local_evaluator
+            )
+    evaluator = backend or backend_from_config(config, case)
     _prepare_run(config, config_path)
-    evaluator = backend or SubprocessBackend(
-        config, case_from_name(config.case_name)
-    )
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(
@@ -186,8 +101,10 @@ def run_optimization(
     backend: EvaluationBackend | None = None,
 ) -> RunSummary:
     """Start a new resumable pygmo DE optimization."""
-
+    config = resolve_runtime_config(config)
     _validate_optimization(config)
+    if backend is None:
+        validate_execution_environment(config)
     pg = _import_pygmo()
     _prepare_new_optimization_run(config, config_path)
     optimization = config.optimization
@@ -201,9 +118,12 @@ def run_optimization(
         config,
         optimization=replace(optimization, seed=seed),
     )
+    resolved = _snapshot_initial_population(resolved)
     case = case_from_name(resolved.case_name)
     space = case.parameter_space(resolved.case_options)
-    manifest = _new_manifest(resolved, case, space)
+    manifest = _new_manifest(
+        resolved, case, space, _backend_name(resolved, backend)
+    )
     _atomic_json(_manifest_path(resolved.run_dir), manifest)
     return _continue_optimization(resolved, manifest, pg, backend)
 
@@ -212,9 +132,9 @@ def resume_optimization(
     run_dir: str | Path,
     *,
     backend: EvaluationBackend | None = None,
+    memory_mib_per_evaluation: int | None = None,
 ) -> RunSummary:
     """Continue a compatible optimization from its latest checkpoint."""
-
     run_path = Path(run_dir).resolve()
     manifest = _read_json(_manifest_path(run_path))
     if manifest.get("schema_version") != _MANIFEST_SCHEMA:
@@ -226,24 +146,57 @@ def resume_optimization(
     if _json_hash(manifest["config"]) != manifest.get("config_hash"):
         raise ValueError("effective run configuration does not match its hash")
 
-    config = _config_from_manifest(run_path, manifest["config"])
+    saved_config = deepcopy(manifest["config"])
+    previous_memory = saved_config["resources"].get(
+        "memory_mib_per_evaluation"
+    )
+    if memory_mib_per_evaluation is not None:
+        if saved_config.get("execution", {}).get("backend") != "slurm":
+            raise ValueError(
+                "memory override is only supported for Slurm resume"
+            )
+        saved_config["resources"]["memory_mib_per_evaluation"] = (
+            memory_mib_per_evaluation
+        )
+    config = resolve_runtime_config(
+        _config_from_manifest(run_path, saved_config)
+    )
     _validate_optimization(config)
+    if backend is None:
+        validate_execution_environment(config)
     pg = _import_pygmo()
     case = case_from_name(config.case_name)
     space = case.parameter_space(config.case_options)
     _validate_parameter_space(manifest["parameter_space"], space)
 
-    provenance = _provenance(case)
+    provenance = _provenance(
+        case,
+        _backend_name(config, backend),
+        config.scratch_dir,
+        config.scratch_mode,
+        config.scratch_dir_template,
+    )
     compatibility_warnings = _provenance_warnings(
         manifest["provenance"][-1], provenance
     )
     for message in compatibility_warnings:
         warnings.warn(message, RuntimeWarning, stacklevel=2)
+    checkpoint = _load_checkpoint(config.run_dir, required=False)
+    if checkpoint is not None:
+        assert config.optimization is not None
+        _validate_checkpoint(checkpoint, manifest, config.optimization)
+    if memory_mib_per_evaluation is not None:
+        provenance["memory_override"] = {
+            "previous_config_hash": manifest["config_hash"],
+            "old_mib": previous_memory,
+            "new_mib": memory_mib_per_evaluation,
+        }
+        manifest["config"] = saved_config
+        manifest["config_hash"] = _json_hash(saved_config)
     provenance["resumed_at"] = _now()
     provenance["warnings"] = compatibility_warnings
     manifest["provenance"].append(provenance)
     manifest["status"] = "running"
-    checkpoint = _load_checkpoint(config.run_dir, required=False)
     if checkpoint is not None:
         manifest["evaluation_ids"] = checkpoint["evaluation_ids"]
         _sync_history(config.run_dir, checkpoint.get("history", []))
@@ -295,7 +248,7 @@ class _OptimizationProblem:
             id=candidate_id,
             parameters=self.space.decode(tuple(vector)),
         )
-        evaluator = self.backend or SubprocessBackend(
+        evaluator = self.backend or backend_from_config(
             self.config, case_from_name(self.config.case_name)
         )
         result = _evaluate_optimization_candidate(
@@ -309,7 +262,6 @@ class _OptimizationProblem:
 
 def inspect_run(run_dir: str | Path) -> RunSummary:
     """Read a completed run summary from disk."""
-
     summary_path = Path(run_dir) / "summary.json"
     raw = json.loads(summary_path.read_text(encoding="utf-8"))
     return RunSummary(
@@ -321,12 +273,32 @@ def inspect_run(run_dir: str | Path) -> RunSummary:
     )
 
 
+class _InitializePopulation:
+    """Construct and evaluate one population inside a pygmo worker."""
+
+    def __init__(self, size: int, seed: int) -> None:
+        self.size = size
+        self.seed = seed
+
+    def evolve(self, population: Any) -> Any:
+        """Populate the supplied problem using its stable island seed."""
+        pg = _import_pygmo()
+        return pg.population(population.problem, self.size, seed=self.seed)
+
+
 def _continue_optimization(
     config: FlowOptConfig,
     manifest: dict[str, Any],
     pg: Any,
     backend: EvaluationBackend | None,
 ) -> RunSummary:
+    if backend is None and config.scratch_mode == "node_local":
+        from hydroflow_opt.backends.node_local import node_local_session
+
+        with node_local_session(
+            config, case_from_name(config.case_name)
+        ) as evaluator:
+            return _continue_optimization(config, manifest, pg, evaluator)
     optimization = config.optimization
     assert optimization is not None and optimization.seed is not None
     checkpoint = _load_checkpoint(config.run_dir, required=False)
@@ -340,6 +312,12 @@ def _continue_optimization(
             "history": [],
         }
     _validate_checkpoint(checkpoint, manifest, optimization)
+    workers = min(
+        optimization.islands, config.resources.concurrent_evaluations
+    )
+    pg.mp_island.init_pool(processes=workers)
+    if pg.mp_island.get_pool_size() != workers:
+        pg.mp_island.resize_pool(workers)
     _initialize_populations(config, manifest, checkpoint, pg, backend)
 
     completed_generation = min(
@@ -398,29 +376,76 @@ def _initialize_populations(
 ) -> None:
     optimization = config.optimization
     assert optimization is not None and optimization.seed is not None
-    for island in range(len(checkpoint["islands"]), optimization.islands):
-        problem = pg.problem(
-            _OptimizationProblem(
-                config,
-                manifest["run_id"],
-                island,
-                0,
-                "initial",
-                backend,
-            )
-        )
-        population = pg.population(
-            problem,
+    initial_population = (
+        _load_initial_population(
+            Path(optimization.initial_population_file),
+            case_from_name(config.case_name).parameter_space(
+                config.case_options
+            ),
             optimization.population_size,
-            seed=_derived_seed(optimization.seed, "population", island, 0),
         )
-        checkpoint["islands"].append(_population_state(population, island, 0))
-        checkpoint["evaluation_ids"].extend(
-            _initial_ids(island, optimization.population_size)
+        if (
+            optimization.initial_population_file is not None
+            and len(checkpoint["islands"]) < optimization.islands
         )
-        _save_checkpoint(config.run_dir, checkpoint)
-        manifest["evaluation_ids"] = checkpoint["evaluation_ids"]
-        _atomic_json(_manifest_path(config.run_dir), manifest)
+        else None
+    )
+    pending: dict[int, Any] = {}
+    first_island = len(checkpoint["islands"])
+    try:
+        # Submit every island before waiting; population construction itself
+        # performs fitness calls and must therefore happen in the worker.
+        for island in range(first_island, optimization.islands):
+            problem = pg.problem(
+                _OptimizationProblem(
+                    config, manifest["run_id"], island, 0, "initial", backend
+                )
+            )
+            population = pg.population(problem, 0)
+            seed = _derived_seed(optimization.seed, "population", island, 0)
+            if initial_population is None:
+                worker = pg.island(
+                    udi=pg.mp_island(),
+                    algo=pg.algorithm(
+                        _InitializePopulation(
+                            optimization.population_size, seed
+                        )
+                    ),
+                    pop=population,
+                )
+                pending[island] = worker
+                worker.evolve()
+            else:
+                selected = random.Random(seed).sample(
+                    initial_population, optimization.population_size
+                )
+                for vector, fitness in selected:
+                    population.push_back(vector, [fitness])
+                pending[island] = population
+
+        # Checkpoints remain an ordered prefix, even if workers finish in a
+        # different order. Candidate outcome files independently support reuse.
+        for island, item in pending.items():
+            if initial_population is None:
+                item.wait_check()
+                population = item.get_population()
+                checkpoint["evaluation_ids"].extend(
+                    _initial_ids(island, optimization.population_size)
+                )
+            else:
+                population = item
+            checkpoint["islands"].append(
+                _population_state(population, island, 0)
+            )
+            _save_checkpoint(config.run_dir, checkpoint)
+            manifest["evaluation_ids"] = checkpoint["evaluation_ids"]
+            _atomic_json(_manifest_path(config.run_dir), manifest)
+    finally:
+        if initial_population is None:
+            # wait() drains tasks without rethrowing their algorithm errors,
+            # preserving the original worker or checkpoint exception.
+            for worker in pending.values():
+                worker.wait()
 
 
 def _build_archipelago(
@@ -434,6 +459,9 @@ def _build_archipelago(
     optimization = config.optimization
     assert optimization is not None and optimization.seed is not None
     archipelago = pg.archipelago(t=pg.fully_connected())
+    archipelago.set_migrant_handling(
+        getattr(pg.migrant_handling, optimization.migrant_handling)
+    )
     for island, state in enumerate(checkpoint["islands"]):
         problem = pg.problem(
             _OptimizationProblem(
@@ -466,6 +494,77 @@ def _build_archipelago(
             _deserialize_migrants(checkpoint["migrants_db"])
         )
     return archipelago
+
+
+def _load_initial_population(
+    path: Path,
+    space: Any,
+    population_size: int,
+) -> list[tuple[list[float], float]]:
+    """Load reusable ``identifier: [vector, objective]`` seed records."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read initial population file: {path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"initial population file is not valid JSON: {path}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ValueError("initial population file must contain a JSON object")
+
+    dimension = len(space.names)
+    records: list[tuple[list[float], float]] = []
+    for identifier, record in raw.items():
+        if (
+            not isinstance(record, list)
+            or len(record) != 2
+            or not isinstance(record[0], list)
+        ):
+            raise ValueError(
+                f"initial population record {identifier!r} must be "
+                "[vector, objective]"
+            )
+        try:
+            vector = [float(value) for value in record[0]]
+            objective = float(record[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"initial population record {identifier!r} is not numerical"
+            ) from exc
+        if len(vector) != dimension:
+            raise ValueError(
+                f"initial population record {identifier!r} has dimension "
+                f"{len(vector)}, expected {dimension}"
+            )
+        if not math.isfinite(objective) or not all(
+            math.isfinite(value) for value in vector
+        ):
+            raise ValueError(
+                f"initial population record {identifier!r} is not finite"
+            )
+        for value, lower, upper in zip(
+            vector,
+            space.lower_bounds,
+            space.upper_bounds,
+            strict=True,
+        ):
+            tolerance = 1.0e-7 * max(1.0, abs(lower), abs(upper))
+            if value < lower - tolerance or value > upper + tolerance:
+                raise ValueError(
+                    f"initial population record {identifier!r} is outside "
+                    "the parameter bounds"
+                )
+        records.append((vector, objective))
+
+    if len(records) < population_size:
+        raise ValueError(
+            "initial population file contains fewer records than "
+            "optimization.population_size"
+        )
+    return records
 
 
 def _population_state(population: Any, island: int, generation: int) -> dict:
@@ -537,18 +636,53 @@ def _prepare_new_optimization_run(
     (config.run_dir / "optimization").mkdir(parents=True, exist_ok=True)
 
 
+def _snapshot_initial_population(config: FlowOptConfig) -> FlowOptConfig:
+    """Copy seed data into the run so resume does not depend on its source."""
+    optimization = config.optimization
+    assert optimization is not None
+    if optimization.initial_population_file is None:
+        return config
+    source = Path(optimization.initial_population_file)
+    destination = (
+        config.run_dir / "optimization" / "initial-population.json"
+    ).resolve()
+    try:
+        shutil.copy2(source, destination)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot snapshot initial population file: {source}"
+        ) from exc
+    return replace(
+        config,
+        optimization=replace(
+            optimization,
+            initial_population_file=str(destination),
+        ),
+    )
+
+
 def _prepare_run(config: FlowOptConfig, config_path: Path | None) -> None:
     config.run_dir.mkdir(parents=True, exist_ok=True)
-    config.scratch_dir.mkdir(parents=True, exist_ok=True)
+    if config.scratch_mode != "node_local":
+        config.scratch_dir.mkdir(parents=True, exist_ok=True)
     if config_path is not None:
         shutil.copy2(config_path, config.run_dir / "config.toml")
 
 
 def _new_manifest(
-    config: FlowOptConfig, case: CasePlugin, space: Any
+    config: FlowOptConfig,
+    case: CasePlugin,
+    space: Any,
+    backend_name: str,
 ) -> dict[str, Any]:
     effective = _effective_config(config)
-    provenance = _provenance(case)
+    provenance = _provenance(
+        case,
+        backend_name,
+        config.scratch_dir,
+        config.scratch_mode,
+        config.scratch_dir_template,
+    )
     provenance["started_at"] = _now()
     return {
         "schema_version": _MANIFEST_SCHEMA,
@@ -571,31 +705,91 @@ def _new_manifest(
 
 def _effective_config(config: FlowOptConfig) -> dict[str, Any]:
     assert config.optimization is not None
+    scratch_template = config.scratch_dir_template
+    scratch_base = config.scratch_dir_base
+    if scratch_template is None:
+        scratch_template = (
+            str(config.scratch_dir)
+            if config.scratch_mode == "node_local"
+            else str(config.scratch_dir.resolve())
+        )
     return {
         "run_dir": str(config.run_dir.resolve()),
-        "scratch_dir": str(config.scratch_dir.resolve()),
+        "scratch_directory": {
+            "template": scratch_template,
+            "base_directory": (
+                str(scratch_base.resolve()) if scratch_base else None
+            ),
+        },
+        **(
+            {"scratch_mode": config.scratch_mode}
+            if config.scratch_mode != "shared"
+            else {}
+        ),
         "case_name": config.case_name,
         "case_options": config.case_options,
         "resources": asdict(config.resources),
+        "execution": config.execution.as_dict(),
         "optimization": asdict(config.optimization),
     }
 
 
 def _config_from_manifest(run_dir: Path, raw: dict[str, Any]) -> FlowOptConfig:
+    scratch_raw = raw.get("scratch_directory")
+    if not isinstance(scratch_raw, dict):
+        raise ValueError("invalid scratch directory in run manifest")
+    template = scratch_raw.get("template")
+    base_directory = scratch_raw.get("base_directory")
+    if not isinstance(template, str) or not template:
+        raise ValueError("invalid scratch directory template in manifest")
+    if base_directory is not None and not isinstance(base_directory, str):
+        raise ValueError("invalid scratch base directory in manifest")
+    scratch_base = (
+        Path(base_directory) if base_directory is not None else run_dir
+    )
     return FlowOptConfig(
         run_dir=run_dir,
-        scratch_dir=Path(raw["scratch_dir"]),
+        scratch_dir=run_dir / "scratch",
         case_name=str(raw["case_name"]),
         case_options=dict(raw["case_options"]),
         resources=ResourceRequest(**raw["resources"]),
+        execution=ExecutionConfig(
+            backend=BackendKind(
+                raw.get("execution", {}).get("backend", "local")
+            ),
+            stage_timeout_seconds=raw.get("execution", {}).get(
+                "stage_timeout_seconds"
+            ),
+        ),
         optimization=OptimizationConfig(**raw["optimization"]),
+        scratch_dir_template=template,
+        scratch_dir_base=scratch_base,
+        scratch_mode=raw.get("scratch_mode", "shared"),
     )
 
 
-def _provenance(case: CasePlugin) -> dict[str, Any]:
+def _provenance(
+    case: CasePlugin,
+    backend_name: str,
+    scratch_dir: Path,
+    scratch_mode: str = "shared",
+    scratch_template: str | None = None,
+) -> dict[str, Any]:
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
+        "execution_backend": backend_name,
+        "scratch_directory": (
+            str(scratch_dir.resolve()) if scratch_mode == "shared" else None
+        ),
+        **(
+            {
+                "scratch_mode": scratch_mode,
+                "scratch_template": scratch_template,
+            }
+            if scratch_mode == "node_local"
+            else {}
+        ),
         "packages": {
             "hydroflow_opt": _package_version("hydroflow_opt"),
             "pygmo": _package_version("pygmo"),
@@ -627,13 +821,28 @@ def _provenance_warnings(
     previous: dict[str, Any], current: dict[str, Any]
 ) -> list[str]:
     messages: list[str] = []
-    for label in ("python", "platform", "packages", "case_plugin"):
+    for label in (
+        "python",
+        "platform",
+        "execution_backend",
+        "packages",
+        "case_plugin",
+    ):
         if previous.get(label) != current.get(label):
             messages.append(
                 f"resume environment differs for {label}: "
                 f"{previous.get(label)!r} -> {current.get(label)!r}"
             )
     return messages
+
+
+def _backend_name(
+    config: FlowOptConfig, backend: EvaluationBackend | None
+) -> str:
+    if backend is None:
+        return config.execution.backend.value
+    backend_type = type(backend)
+    return f"{backend_type.__module__}.{backend_type.__qualname__}"
 
 
 def _validate_parameter_space(raw: dict[str, Any], space: Any) -> None:
@@ -735,7 +944,7 @@ def _read_owned_results(
     for candidate_id in evaluation_ids:
         evaluation_dir = config.run_dir / "evaluations" / candidate_id
         raw = _read_json(evaluation_dir / "outcome.json")
-        results.append(_result_from_json(raw, candidate_id, evaluation_dir))
+        results.append(result_from_json(raw, candidate_id, evaluation_dir))
     return results
 
 
@@ -761,20 +970,20 @@ def _evaluate_optimization_candidate(
         try:
             previous = _read_json(identity_path)
         except (OSError, ValueError, json.JSONDecodeError):
-            _archive_attempt(evaluation_dir)
+            archive_attempt(evaluation_dir)
         else:
             if previous != identity:
-                _archive_attempt(evaluation_dir)
+                archive_attempt(evaluation_dir)
             elif outcome_path.exists():
                 try:
-                    return _result_from_json(
+                    return result_from_json(
                         _read_json(outcome_path), candidate.id, evaluation_dir
                     )
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     pass
     _atomic_json(identity_path, identity)
     result = backend.evaluate(candidate, context)
-    _write_result(outcome_path, result)
+    write_result(outcome_path, result)
     return result
 
 
@@ -785,7 +994,7 @@ def _write_summary(
     _atomic_text(
         results_path,
         "".join(
-            json.dumps(_result_to_json(result)) + "\n" for result in results
+            json.dumps(result_to_json(result)) + "\n" for result in results
         ),
     )
     succeeded = sum(
@@ -800,68 +1009,6 @@ def _write_summary(
     )
     _atomic_json(summary.summary_path, asdict(summary))
     return summary
-
-
-def _result_from_json(
-    raw: dict[str, Any], candidate_id: str, evaluation_dir: Path
-) -> EvaluationResult:
-    if raw.get("candidate_id") != candidate_id:
-        raise ValueError("worker result candidate_id does not match request")
-    metadata_value = raw.get("metadata", {})
-    if not isinstance(metadata_value, dict):
-        raise TypeError("worker result metadata must be an object")
-    metadata_copy = dict(metadata_value)
-    metadata_copy["evaluation_dir"] = str(evaluation_dir)
-    status = EvaluationStatus(str(raw["status"]))
-    if status is EvaluationStatus.SUCCESS:
-        return EvaluationResult.success(
-            candidate_id,
-            float(raw["objective"]),
-            timings={
-                str(k): float(v) for k, v in raw.get("timings", {}).items()
-            },
-            metadata=metadata_copy,
-        )
-    return EvaluationResult.failed(
-        candidate_id,
-        str(raw.get("error", "worker reported failure")),
-        timings={str(k): float(v) for k, v in raw.get("timings", {}).items()},
-        metadata=metadata_copy,
-    )
-
-
-def _write_result(path: Path, result: EvaluationResult) -> None:
-    _atomic_json(path, _result_to_json(result))
-
-
-def _result_to_json(result: EvaluationResult) -> dict[str, object]:
-    return {
-        "candidate_id": result.candidate_id,
-        "status": result.status.value,
-        "objective": result.objective,
-        "timings": result.timings,
-        "metadata": result.metadata,
-        "error": result.error,
-    }
-
-
-def _archive_attempt(evaluation_dir: Path) -> None:
-    attempts_dir = evaluation_dir / "attempts"
-    attempts_dir.mkdir(exist_ok=True)
-    number = len([path for path in attempts_dir.iterdir() if path.is_dir()])
-    destination = attempts_dir / f"attempt-{number + 1:04d}"
-    destination.mkdir()
-    for name in (
-        "evaluation.json",
-        "outcome.json",
-        "request.json",
-        "result.json",
-        "stdout.log",
-        "stderr.log",
-    ):
-        source = evaluation_dir / name
-        if source.exists():
-            shutil.move(str(source), destination / name)
 
 
 def _atomic_json(path: Path, value: Any) -> None:

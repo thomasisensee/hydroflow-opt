@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-    "hatchling>=1.25",
+    "hatchling>=1.27",
 ]
 build-backend = "hatchling.build"
 
@@ -12,9 +12,12 @@ readme = "README.md"
 maintainers = [
     { name = "Thomas Isensee", email = "thomas.isensee@iwr.uni-heidelberg.de" },
 ]
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11,<3.14"
-license-files = ["LICEN[CS]E*"]
+license-files = [
+    "LICENSE.md",
+    "COPYING.md",
+]
 license = "MIT"
 classifiers = [
     "Intended Audience :: Science/Research",
@@ -26,6 +29,7 @@ classifiers = [
 dependencies = [
     "numpy",
     "pygmo>=2.19.8",
+    "tomlkit>=0.15.1",
 ]
 
 [project.optional-dependencies]
@@ -55,7 +59,7 @@ hydroflow-opt = "hydroflow_opt.cli:main"
 
 [project.urls]
 repository = "https://github.com/thomasisensee/hydroflow-opt"
-
+documentation = "https://hydroflow-opt.readthedocs.io"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hydroflow_opt"]
@@ -77,10 +81,21 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = [
-    "E",
-    "F",
-    "I",
+    "B",   # flake8-bugbear
+    "D",   # pydocstyle
+    "E",   # pycodestyle error rules
+    "F",   # Pyflakes
+    "I",   # isort
+    "SIM", # flake8-simplify
+    "UP",  # pyupgrade
+    "RUF", # Ruff-specific rules
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
 
 [[tool.uv.index]]
 name = "testpypi"

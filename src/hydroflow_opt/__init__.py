@@ -2,16 +2,27 @@
 
 from importlib import metadata
 
+from hydroflow_opt.backends import SlurmBackend, SubprocessBackend
 from hydroflow_opt.cases import CasePlugin, case_from_name
-from hydroflow_opt.config import FlowOptConfig, OptimizationConfig, load_config
+from hydroflow_opt.config import (
+    ExecutionConfig,
+    FlowOptConfig,
+    OptimizationConfig,
+    load_config,
+)
 from hydroflow_opt.models import (
+    BackendKind,
     Candidate,
     EvaluationBackend,
     EvaluationContext,
+    EvaluationPaths,
+    EvaluationPlan,
     EvaluationResult,
+    EvaluationStage,
     EvaluationStatus,
     ParameterSpace,
     ResourceRequest,
+    StageResources,
 )
 from hydroflow_opt.runner import (
     RunSummary,
@@ -27,20 +38,28 @@ except metadata.PackageNotFoundError:  # pragma: no cover
 del metadata
 
 __all__ = [
+    "BackendKind",
     "Candidate",
     "CasePlugin",
     "EvaluationBackend",
     "EvaluationContext",
+    "EvaluationPaths",
+    "EvaluationPlan",
     "EvaluationResult",
+    "EvaluationStage",
     "EvaluationStatus",
+    "ExecutionConfig",
     "FlowOptConfig",
     "OptimizationConfig",
     "ParameterSpace",
     "ResourceRequest",
     "RunSummary",
+    "SlurmBackend",
+    "StageResources",
+    "SubprocessBackend",
     "case_from_name",
     "load_config",
+    "resume_optimization",
     "run_local",
     "run_optimization",
-    "resume_optimization",
 ]

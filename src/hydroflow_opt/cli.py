@@ -15,7 +15,6 @@ from hydroflow_opt.runner import (
 
 def main(argv: list[str] | None = None) -> int:
     """Run the ``hydroflow-opt`` command line interface."""
-
     parser = argparse.ArgumentParser(prog="hydroflow-opt")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("check", "run", "optimize"):
@@ -25,7 +24,24 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser.add_argument("run_dir", type=Path)
     resume_parser = subparsers.add_parser("resume")
     resume_parser.add_argument("run_dir", type=Path)
+    resume_parser.add_argument("--memory-mib-per-evaluation", type=int)
+    replay_parser = subparsers.add_parser(
+        "replay-config",
+        help="create a single-candidate TOML from request.json",
+    )
+    replay_parser.add_argument("request", type=Path)
+    replay_parser.add_argument("output", type=Path)
     args = parser.parse_args(argv)
+
+    if args.command == "replay-config":
+        from hydroflow_opt.replay import create_replay_config
+
+        try:
+            output = create_replay_config(args.request, args.output)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(f"replay configuration written: {output}")
+        return 0
 
     if args.command == "inspect":
         summary = inspect_run(args.run_dir)
@@ -36,14 +52,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "resume":
-        summary = resume_optimization(args.run_dir)
+        summary = resume_optimization(
+            args.run_dir,
+            memory_mib_per_evaluation=args.memory_mib_per_evaluation,
+        )
         print(
             f"run complete: {summary.succeeded}/{summary.total} succeeded, "
             f"results={summary.results_path}"
         )
         return 0 if summary.failed == 0 else 1
 
-    config = load_config(args.config)
+    config = load_config(args.config, resolve_scratch=args.command != "check")
     case_from_name(config.case_name)
     if args.command == "check":
         print(f"configuration ok: case={config.case_name}")

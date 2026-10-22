@@ -1,38 +1,40 @@
 """Public contracts for cases, resources, and evaluation results."""
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
+from pathlib import Path
 from typing import Any, Protocol, Self
 
 
-class EvaluationStatus(str, Enum):
+class EvaluationStatus(StrEnum):
     """Terminal state of one candidate evaluation.
 
-    Values
-    ------
-    SUCCESS
-        The evaluator completed and produced an objective value.
-    FAILED
-        The evaluator did not produce a valid objective value. The result
-        should contain an error message explaining the failure.
+    Attributes:
+        SUCCESS: The evaluator completed and produced an objective value.
+        FAILED: The evaluator did not produce a valid objective value. The
+            result should contain an error message explaining the failure.
     """
 
     SUCCESS = "success"
     FAILED = "failed"
 
 
+class BackendKind(StrEnum):
+    """Built-in execution backend selected by run configuration."""
+
+    LOCAL = "local"
+    SLURM = "slurm"
+
+
 @dataclass(frozen=True)
 class Candidate:
     """Input parameters for one workflow evaluation.
 
-    Parameters
-    ----------
-    id
-        Stable identifier for the candidate. It is used in logs and result
-        files, so it should be unique within one run.
-    parameters
-        Numeric parameter values passed to the evaluator. The meaning of each
-        parameter is defined by the workflow-specific evaluator.
+    Attributes:
+        id: Stable identifier for the candidate. It is used in logs and result
+            files, so it should be unique within one run.
+        parameters: Numeric parameter values passed to the evaluator. The
+            workflow-specific evaluator defines the meaning of each parameter.
     """
 
     id: str
@@ -59,6 +61,7 @@ class ParameterSpace:
     upper_bounds: tuple[float, ...]
 
     def __post_init__(self) -> None:
+        """Validate dimensions, uniqueness, and bound ordering."""
         if not self.names:
             raise ValueError(
                 "a parameter space must contain at least one value"
@@ -85,7 +88,6 @@ class ParameterSpace:
         self, values: list[float] | tuple[float, ...]
     ) -> dict[str, float]:
         """Map an optimizer vector to the case's named parameter mapping."""
-
         if len(values) != len(self.names):
             raise ValueError(
                 "candidate dimension does not match parameter space"
@@ -98,14 +100,26 @@ class ParameterSpace:
 
 @dataclass(frozen=True)
 class ResourceRequest:
-    """The complete CPU shape of one evaluation and its local capacity."""
+    """CPU capacity and the total memory reservation for each evaluation."""
 
     available_cpus: int = 1
     concurrent_evaluations: int = 1
     mpi_ranks: int = 1
     threads_per_rank: int = 1
+    memory_mib_per_evaluation: int | None = None
 
     def __post_init__(self) -> None:
+        """Validate positive counts and the total CPU budget."""
+        memory = self.memory_mib_per_evaluation
+        if memory is not None and (
+            isinstance(memory, bool)
+            or not isinstance(memory, int)
+            or memory < 1
+        ):
+            raise ValueError(
+                "resources.memory_mib_per_evaluation "
+                "must be a positive integer"
+            )
         values = (
             self.available_cpus,
             self.concurrent_evaluations,
@@ -123,36 +137,94 @@ class ResourceRequest:
     @property
     def cpus_per_evaluation(self) -> int:
         """CPU count occupied by one candidate evaluation."""
-
         return self.mpi_ranks * self.threads_per_rank
 
     @property
     def total_requested_cpus(self) -> int:
         """Maximum simultaneous CPU demand."""
-
         return self.concurrent_evaluations * self.cpus_per_evaluation
+
+
+@dataclass(frozen=True)
+class StageResources:
+    """Portable process and thread shape requested by one stage."""
+
+    processes: int = 1
+    threads_per_process: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate positive process and thread counts."""
+        if self.processes < 1 or self.threads_per_process < 1:
+            raise ValueError("stage resource counts must be at least one")
+
+    @property
+    def cpus(self) -> int:
+        """Return the maximum CPU count occupied by the stage."""
+        return self.processes * self.threads_per_process
+
+
+@dataclass(frozen=True)
+class EvaluationPaths:
+    """Core-owned paths available while constructing an evaluation plan."""
+
+    evaluation_dir: Path
+    scratch_dir: Path
+    request_path: Path
+    result_path: Path
+
+
+@dataclass(frozen=True)
+class EvaluationStage:
+    """One external command and its backend-neutral resource request."""
+
+    name: str
+    command: tuple[str, ...]
+    working_directory: Path
+    resources: StageResources = field(default_factory=StageResources)
+
+    def __post_init__(self) -> None:
+        """Validate the stage name and command."""
+        if (
+            not self.name
+            or self.name in {".", ".."}
+            or "/" in self.name
+            or "\\" in self.name
+        ):
+            raise ValueError("stage name must be a safe path component")
+        if not self.command or any(not item for item in self.command):
+            raise ValueError("stage command must contain non-empty strings")
+
+
+@dataclass(frozen=True)
+class EvaluationPlan:
+    """Ordered stages that produce one structured evaluation result."""
+
+    stages: tuple[EvaluationStage, ...]
+
+    def __post_init__(self) -> None:
+        """Require a nonempty plan with unique stage names."""
+        if not self.stages:
+            raise ValueError(
+                "an evaluation plan must contain at least one stage"
+            )
+        names = [stage.name for stage in self.stages]
+        if len(set(names)) != len(names):
+            raise ValueError("evaluation stage names must be unique")
 
 
 @dataclass(frozen=True)
 class EvaluationResult:
     """Result record produced by one candidate evaluation.
 
-    Parameters
-    ----------
-    candidate_id
-        Identifier of the evaluated candidate.
-    status
-        Terminal evaluation status.
-    objective
-        Scalar objective value. Successful evaluations should set this value;
-        failed evaluations usually leave it as ``None``.
-    timings
-        Mapping from stage names to elapsed seconds, for example
-        ``{"meshing": 3.2, "simulation": 41.0}``.
-    metadata
-        Additional structured result data produced by the evaluator.
-    error
-        Human-readable error message for failed evaluations.
+    Attributes:
+        candidate_id: Identifier of the evaluated candidate.
+        status: Terminal evaluation status.
+        objective: Scalar objective value. Successful evaluations should set
+            this value; failed evaluations usually leave it as ``None``.
+        timings: Mapping from stage names to elapsed seconds, for example
+            ``{"meshing": 3.2, "simulation": 41.0}``.
+        metadata: Additional structured result data produced by the evaluator.
+        error: Human-readable error message for failed evaluations.
     """
 
     candidate_id: str
@@ -173,23 +245,15 @@ class EvaluationResult:
     ) -> Self:
         """Create a successful evaluation result.
 
-        Parameters
-        ----------
-        candidate_id
-            Identifier of the evaluated candidate.
-        objective
-            Scalar objective value produced by the evaluator.
-        timings
-            Optional stage timings in seconds.
-        metadata
-            Optional additional structured result data.
+        Args:
+            candidate_id: Identifier of the evaluated candidate.
+            objective: Scalar objective value produced by the evaluator.
+            timings: Optional stage timings in seconds.
+            metadata: Optional additional structured result data.
 
-        Returns
-        -------
-        EvaluationResult
+        Returns:
             A result with ``status`` set to ``SUCCESS``.
         """
-
         return cls(
             candidate_id=candidate_id,
             status=EvaluationStatus.SUCCESS,
@@ -209,23 +273,15 @@ class EvaluationResult:
     ) -> Self:
         """Create a failed evaluation result.
 
-        Parameters
-        ----------
-        candidate_id
-            Identifier of the evaluated candidate.
-        error
-            Human-readable description of the failure.
-        timings
-            Optional stage timings collected before the failure.
-        metadata
-            Optional additional structured diagnostic data.
+        Args:
+            candidate_id: Identifier of the evaluated candidate.
+            error: Human-readable description of the failure.
+            timings: Optional stage timings collected before the failure.
+            metadata: Optional additional structured diagnostic data.
 
-        Returns
-        -------
-        EvaluationResult
+        Returns:
             A result with ``status`` set to ``FAILED``.
         """
-
         return cls(
             candidate_id=candidate_id,
             status=EvaluationStatus.FAILED,

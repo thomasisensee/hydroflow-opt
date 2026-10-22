@@ -1,24 +1,35 @@
 """Tests that need no CFD runtime or scheduler."""
 
 import json
+import multiprocessing
+import os
+import pickle
+import subprocess
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import hydroflow_opt.runner as runner
 from hydroflow_opt import (
+    BackendKind,
     Candidate,
+    EvaluationPlan,
     EvaluationResult,
+    EvaluationStage,
     EvaluationStatus,
     ParameterSpace,
     ResourceRequest,
+    SlurmBackend,
+    StageResources,
+    SubprocessBackend,
     case_from_name,
     load_config,
     run_local,
 )
 from hydroflow_opt.cli import main
 from hydroflow_opt.runner import (
-    SubprocessBackend,
     inspect_run,
     resume_optimization,
     run_optimization,
@@ -33,21 +44,124 @@ class InMemoryBackend:
         return EvaluationResult.success(candidate.id, objective)
 
 
-def write_config(tmp_path, *, concurrent=1, mpi_ranks=1, name="run"):
+class RecordingInitializationBackend:
+    """Record worker activity through multiprocessing manager proxies."""
+
+    def __init__(self, events, barrier, failure=None):
+        self.events = events
+        self.barrier = barrier
+        self.failure = failure
+
+    def __deepcopy__(self, memo):
+        # pygmo copies problems; retain proxies to the shared recorder and
+        # barrier rather than copying the manager's underlying objects.
+        return type(self)(self.events, self.barrier, self.failure)
+
+    def evaluate(self, candidate, context=None):
+        self.events.append(
+            ("start", candidate.id, context.island, os.getpid())
+        )
+        if context.phase == "initial" and context.position == 0:
+            self.barrier.wait(timeout=20)
+            if context.island == 0 and self.failure == "exception":
+                raise RuntimeError("initialization worker failed")
+        result = InMemoryBackend().evaluate(candidate, context)
+        if self.failure == "result":
+            result = EvaluationResult.failed(candidate.id, "simulation failed")
+        self.events.append(("end", candidate.id, context.island, os.getpid()))
+        return result
+
+
+class TwoStageCase:
+    """Case exposing serial preparation and a parallel solver stage."""
+
+    def parameter_space(self, options):
+        del options
+        return ParameterSpace(("x", "y"), (-5.0, -5.0), (5.0, 5.0))
+
+    def evaluation_plan(self, candidate, paths, resources):
+        del candidate, resources
+        return EvaluationPlan(
+            (
+                EvaluationStage(
+                    "prepare",
+                    ("prepare-command",),
+                    paths.evaluation_dir,
+                ),
+                EvaluationStage(
+                    "solve",
+                    ("solver-command", str(paths.result_path)),
+                    paths.evaluation_dir,
+                    StageResources(2, 3),
+                ),
+            )
+        )
+
+
+class FailingCase:
+    """Case proving that a failed stage prevents later commands."""
+
+    def parameter_space(self, options):
+        del options
+        return ParameterSpace(("x", "y"), (-5.0, -5.0), (5.0, 5.0))
+
+    def evaluation_plan(self, candidate, paths, resources):
+        del candidate, resources
+        return EvaluationPlan(
+            (
+                EvaluationStage(
+                    "prepare",
+                    ("failing-command",),
+                    paths.evaluation_dir,
+                ),
+                EvaluationStage(
+                    "solve",
+                    ("must-not-run", str(paths.result_path)),
+                    paths.evaluation_dir,
+                ),
+            )
+        )
+
+
+def write_config(
+    tmp_path,
+    *,
+    concurrent=1,
+    mpi_ranks=1,
+    threads_per_rank=1,
+    name="run",
+    backend=None,
+    scratch_directory=None,
+):
     config_path = tmp_path / f"{name}.toml"
+    if scratch_directory is None:
+        scratch_directory = f"{name}-scratch"
+    execution = (
+        ""
+        if backend is None
+        else f"""
+[execution]
+backend = "{backend}"
+"""
+    )
+    memory_line = (
+        "memory_mib_per_evaluation = 1536" if backend == "slurm" else ""
+    )
     config_path.write_text(
         f"""[run]
 directory = "{name}"
-scratch_directory = "{name}-scratch"
+scratch_directory = "{scratch_directory}"
 
 [case]
 name = "quadratic"
+{execution}
 
 [resources]
-available_cpus = {concurrent * mpi_ranks}
+available_cpus = {concurrent * mpi_ranks * threads_per_rank}
 concurrent_evaluations = {concurrent}
 mpi_ranks = {mpi_ranks}
-threads_per_rank = 1
+threads_per_rank = {threads_per_rank}
+{memory_line}
 
 [[candidate]]
 id = "a"
@@ -73,8 +187,20 @@ def add_optimization(
     population_size: int = 5,
     generations: int = 1,
     seed: int | None = None,
+    initial_population_file: str | None = None,
+    migrant_handling: str | None = None,
 ) -> None:
     seed_line = "" if seed is None else f"seed = {seed}\n"
+    initial_population_line = (
+        ""
+        if initial_population_file is None
+        else f'initial_population_file = "{initial_population_file}"\n'
+    )
+    migrant_handling_line = (
+        ""
+        if migrant_handling is None
+        else f'migrant_handling = "{migrant_handling}"\n'
+    )
     with config_path.open("a", encoding="utf-8") as stream:
         stream.write(
             f"""
@@ -82,7 +208,7 @@ def add_optimization(
 islands = {islands}
 population_size = {population_size}
 generations = {generations}
-{seed_line}"""
+{seed_line}{initial_population_line}{migrant_handling_line}"""
         )
 
 
@@ -116,7 +242,65 @@ def test_load_config(tmp_path):
     assert config.run_dir == tmp_path / "run"
     assert config.case_name == "quadratic"
     assert config.resources.total_requested_cpus == 4
+    assert config.execution.backend is BackendKind.LOCAL
     assert [candidate.id for candidate in config.candidates] == ["a", "b"]
+
+
+def test_scratch_directory_expands_environment_variables(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HYDROFLOW_TEST_ROOT", "relative-scratch")
+    monkeypatch.setenv("HYDROFLOW_TEST_USER", "tester")
+    config = load_config(
+        write_config(
+            tmp_path,
+            scratch_directory=(
+                "$HYDROFLOW_TEST_ROOT/${HYDROFLOW_TEST_USER}/$$cases"
+            ),
+        )
+    )
+
+    assert config.scratch_dir == (
+        tmp_path / "relative-scratch" / "tester" / "$cases"
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["${BROKEN", "$9INVALID", "${NAME:-fallback}", "$(pwd)"]
+)
+def test_scratch_directory_rejects_invalid_templates(tmp_path, value):
+    config_path = write_config(tmp_path, scratch_directory=value)
+
+    with pytest.raises(ValueError, match="invalid environment variable"):
+        load_config(config_path, resolve_scratch=False)
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_run_requires_nonempty_scratch_environment_variables(
+    tmp_path, monkeypatch, value
+):
+    config_path = write_config(
+        tmp_path,
+        scratch_directory="${HYDROFLOW_MISSING_ROOT}/cases",
+    )
+    if value is None:
+        monkeypatch.delenv("HYDROFLOW_MISSING_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("HYDROFLOW_MISSING_ROOT", value)
+
+    assert main(["check", str(config_path)]) == 0
+    with pytest.raises(ValueError, match="HYDROFLOW_MISSING_ROOT"):
+        main(["run", str(config_path)])
+    assert not (tmp_path / "run").exists()
+
+
+def test_load_config_selects_slurm_and_rejects_unknown_backend(tmp_path):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    assert config.execution.backend is BackendKind.SLURM
+
+    invalid = write_config(tmp_path, name="invalid", backend="unknown")
+    with pytest.raises(ValueError, match="local, slurm"):
+        load_config(invalid)
 
 
 def test_run_local_writes_isolated_results(tmp_path):
@@ -131,7 +315,43 @@ def test_run_local_writes_isolated_results(tmp_path):
     ]
     assert [record["objective"] for record in records] == [25.0, 5.0]
     assert (tmp_path / "run" / "evaluations" / "a" / "request.json").exists()
+    stage_dir = (
+        tmp_path / "run" / "evaluations" / "a" / "stages" / "01-evaluate"
+    )
+    assert (stage_dir / "stdout.log").exists()
+    assert (stage_dir / "stderr.log").exists()
+    metadata = json.loads(
+        (stage_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["resources"] == {
+        "processes": 1,
+        "threads_per_process": 1,
+    }
+    assert records[0]["timings"]["evaluate"] >= 0.0
     assert inspect_run(tmp_path / "run") == summary
+
+
+def test_run_uses_expanded_scratch_and_persistent_output(
+    tmp_path, monkeypatch
+):
+    scratch_root = tmp_path / "node-local"
+    monkeypatch.setenv("TMPDIR", str(scratch_root))
+    config_path = write_config(
+        tmp_path, scratch_directory="${TMPDIR}/hydroflow-opt"
+    )
+
+    summary = run_local(load_config(config_path), config_path=config_path)
+
+    request = json.loads(
+        (tmp_path / "run" / "evaluations" / "a" / "request.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert request["context"]["scratch_dir"] == str(
+        scratch_root / "hydroflow-opt" / "a"
+    )
+    assert summary.results_path == tmp_path / "run" / "results.jsonl"
+    assert summary.results_path.exists()
 
 
 def test_cli_check_run_and_inspect(tmp_path, capsys):
@@ -142,6 +362,13 @@ def test_cli_check_run_and_inspect(tmp_path, capsys):
     assert "run complete" in capsys.readouterr().out
     assert main(["inspect", str(tmp_path / "run")]) == 0
     assert "2/2 succeeded" in capsys.readouterr().out
+
+
+def test_cli_check_accepts_slurm_without_active_allocation(tmp_path, capsys):
+    config_path = write_config(tmp_path, backend="slurm")
+    assert main(["check", str(config_path)]) == 0
+    assert "configuration ok" in capsys.readouterr().out
+    assert not (tmp_path / "run").exists()
 
 
 def test_run_requires_candidates(tmp_path):
@@ -211,6 +438,76 @@ def test_omitted_seed_is_generated_and_recorded(tmp_path):
     seed = manifest["config"]["optimization"]["seed"]
     assert isinstance(seed, int)
     assert 0 <= seed <= 0xFFFFFFFF
+
+
+def test_optimization_can_seed_pre_evaluated_populations(tmp_path):
+    pytest.importorskip("pygmo")
+    initial_path = tmp_path / "initial.json"
+    initial_path.write_text(
+        json.dumps(
+            {
+                str(index): [[float(index), float(-index)], index * 2.0]
+                for index in range(-2, 4)
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = write_config(tmp_path)
+    add_optimization(
+        config_path,
+        seed=123,
+        initial_population_file=initial_path.name,
+        migrant_handling="evict",
+    )
+
+    config = load_config(config_path)
+    assert config.optimization is not None
+    assert config.optimization.initial_population_file == str(initial_path)
+    assert config.optimization.migrant_handling == "evict"
+    summary = run_optimization(config, backend=InMemoryBackend())
+
+    assert summary.total == 5
+    snapshot = tmp_path / "run" / "optimization" / "initial-population.json"
+    assert json.loads(snapshot.read_text(encoding="utf-8")) == json.loads(
+        initial_path.read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (tmp_path / "run" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["config"]["optimization"][
+        "initial_population_file"
+    ] == str(snapshot)
+    checkpoint = json.loads(
+        (tmp_path / "run" / "optimization" / "checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert all(
+        "-initial-" not in item for item in checkpoint["evaluation_ids"]
+    )
+    assert (
+        not (tmp_path / "run" / "evaluations")
+        .joinpath("island-000-initial-000")
+        .exists()
+    )
+
+
+def test_initial_population_rejects_too_few_records(tmp_path):
+    pytest.importorskip("pygmo")
+    initial_path = tmp_path / "initial.json"
+    initial_path.write_text(
+        json.dumps({"one": [[0.0, 0.0], 0.0]}),
+        encoding="utf-8",
+    )
+    config_path = write_config(tmp_path)
+    add_optimization(
+        config_path,
+        seed=123,
+        initial_population_file=initial_path.name,
+    )
+
+    with pytest.raises(ValueError, match="fewer records"):
+        run_optimization(load_config(config_path), backend=InMemoryBackend())
 
 
 def test_new_optimization_rejects_nonempty_run_directory(tmp_path):
@@ -340,6 +637,447 @@ def test_subprocess_backend_archives_mismatched_unfinished_attempt(tmp_path):
     attempt = tmp_path / "run" / "evaluations" / "a" / "attempts"
     assert (attempt / "attempt-0001" / "request.json").exists()
     assert (attempt / "attempt-0001" / "result.json").exists()
+    assert (attempt / "attempt-0001" / "stages").is_dir()
+
+
+def test_failed_stage_stops_plan_and_records_diagnostics(
+    tmp_path, monkeypatch
+):
+    config = load_config(write_config(tmp_path))
+    backend = SubprocessBackend(config, FailingCase())
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        kwargs["stdout"].write("partial")
+        kwargs["stderr"].write("boom")
+        return subprocess.CompletedProcess(command, 7, "partial", "boom")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = backend.evaluate(config.candidates[0])
+
+    assert commands == [["failing-command"]]
+    assert result.status is EvaluationStatus.FAILED
+    assert result.error == "stage 'prepare' exited with status 7"
+    assert result.metadata["failed_stage"] == "prepare"
+    stage_dir = config.run_dir / "evaluations" / "a" / "stages" / "01-prepare"
+    assert (stage_dir / "stdout.log").read_text(encoding="utf-8") == "partial"
+    assert (stage_dir / "stderr.log").read_text(encoding="utf-8") == "boom"
+
+
+def test_local_backend_uses_mpiexec_for_multi_process_stage(tmp_path):
+    config = load_config(
+        write_config(tmp_path, mpi_ranks=2, threads_per_rank=3)
+    )
+    backend = SubprocessBackend(config, TwoStageCase())
+    stage = (
+        TwoStageCase()
+        .evaluation_plan(
+            config.candidates[0],
+            backend._evaluation_paths(config.candidates[0]),
+            config.resources,
+        )
+        .stages[1]
+    )
+
+    assert backend.launch_command(stage) == [
+        "mpiexec",
+        "-n",
+        "2",
+        "solver-command",
+        str(config.run_dir / "evaluations" / "a" / "result.json"),
+    ]
+
+
+def test_builtin_backends_are_pickle_safe(tmp_path):
+    config = load_config(write_config(tmp_path))
+    case = case_from_name("quadratic")
+    for backend in (
+        SubprocessBackend(config, case),
+        SlurmBackend(config, case),
+    ):
+        restored = pickle.loads(pickle.dumps(backend))
+        assert type(restored) is type(backend)
+        assert restored.config == config
+
+
+def test_slurm_requires_allocation_before_creating_run(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="existing sbatch or salloc"):
+        run_local(config)
+
+    assert not config.run_dir.exists()
+
+
+def test_slurm_requires_srun_before_creating_run(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: None
+    )
+
+    with pytest.raises(RuntimeError, match="srun"):
+        run_local(config)
+
+    assert not config.run_dir.exists()
+
+
+def test_slurm_allows_tmpdir_scratch_on_one_node(tmp_path, monkeypatch):
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "local-tmp"))
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            scratch_directory="$TMPDIR/hydroflow-opt",
+        )
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.delenv("SLURM_JOB_NUM_NODES", raising=False)
+    monkeypatch.setenv("SLURM_NNODES", "1")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+
+    SlurmBackend.validate_environment(config)
+
+
+@pytest.mark.parametrize(
+    ("nodes", "message"),
+    [(None, "exactly one"), ("many", "valid"), ("2", "exactly one")],
+)
+def test_slurm_rejects_unsafe_tmpdir_allocations_before_creating_run(
+    tmp_path, monkeypatch, nodes, message
+):
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "local-tmp"))
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            scratch_directory="${TMPDIR}/hydroflow-opt",
+        )
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.delenv("SLURM_NNODES", raising=False)
+    if nodes is None:
+        monkeypatch.delenv("SLURM_JOB_NUM_NODES", raising=False)
+    else:
+        monkeypatch.setenv("SLURM_JOB_NUM_NODES", nodes)
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        run_local(config)
+    assert not config.run_dir.exists()
+
+
+def test_slurm_allows_shared_scratch_on_multiple_nodes(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setenv("SLURM_JOB_NUM_NODES", "2")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+
+    SlurmBackend.validate_environment(config)
+
+
+def test_slurm_launches_quadratic_as_a_serial_stage(tmp_path, monkeypatch):
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            mpi_ranks=2,
+            threads_per_rank=3,
+        )
+    )
+    backend = SlurmBackend(config, case_from_name("quadratic"))
+    candidate = config.candidates[0]
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        request = json.loads(Path(command[-2]).read_text(encoding="utf-8"))
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "candidate_id": request["candidate"]["id"],
+                    "status": "success",
+                    "objective": 25.0,
+                    "metadata": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        kwargs["stdout"].write("worker out")
+        return subprocess.CompletedProcess(command, 0, None, None)
+
+    monkeypatch.setenv("SLURM_JOB_ID", "456")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = backend.evaluate(candidate)
+
+    assert commands == [
+        [
+            "srun",
+            "--exclusive",
+            "--nodes=1",
+            "--ntasks=1",
+            "--cpus-per-task=1",
+            "--cpu-bind=cores",
+            "--mem=1536M",
+            *case_from_name("quadratic")
+            .evaluation_plan(
+                candidate,
+                backend._evaluation_paths(candidate),
+                config.resources,
+            )
+            .stages[0]
+            .command,
+        ]
+    ]
+    assert result.objective == 25.0
+    assert result.metadata["slurm_job_id"] == "456"
+    stdout = (
+        config.run_dir
+        / "evaluations"
+        / "a"
+        / "stages"
+        / "01-evaluate"
+        / "stdout.log"
+    )
+    assert stdout.read_text(encoding="utf-8") == "worker out"
+
+
+def test_slurm_launches_each_stage_with_its_resource_shape(
+    tmp_path, monkeypatch
+):
+    config = load_config(
+        write_config(
+            tmp_path,
+            backend="slurm",
+            mpi_ranks=2,
+            threads_per_rank=3,
+        )
+    )
+    backend = SlurmBackend(config, TwoStageCase())
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if "solver-command" not in command:
+            return subprocess.CompletedProcess(command, 0, "prepared", "")
+        result_path = Path(command[-1])
+        request = json.loads(
+            (result_path.parent / "request.json").read_text(encoding="utf-8")
+        )
+        result_path.write_text(
+            json.dumps(
+                {
+                    "candidate_id": request["candidate"]["id"],
+                    "status": "success",
+                    "objective": 25.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("SLURM_JOB_ID", "456")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = backend.evaluate(config.candidates[0])
+
+    assert commands == [
+        [
+            "srun",
+            "--exclusive",
+            "--nodes=1",
+            "--ntasks=1",
+            "--cpus-per-task=1",
+            "--cpu-bind=cores",
+            "--mem=1536M",
+            "prepare-command",
+        ],
+        [
+            "srun",
+            "--exclusive",
+            "--nodes=1",
+            "--ntasks=2",
+            "--cpus-per-task=3",
+            "--cpu-bind=cores",
+            "--mem=1536M",
+            "--mpi=pmix",
+            "solver-command",
+            str(config.run_dir / "evaluations" / "a" / "result.json"),
+        ],
+    ]
+    assert result.objective == 25.0
+    assert result.metadata["slurm_job_id"] == "456"
+
+
+def test_slurm_cache_avoids_a_second_srun(tmp_path, monkeypatch):
+    config = load_config(write_config(tmp_path, backend="slurm"))
+    backend = SlurmBackend(config, case_from_name("quadratic"))
+    candidate = config.candidates[0]
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "candidate_id": candidate.id,
+                    "status": "success",
+                    "objective": 25.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("SLURM_JOB_ID", "789")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend.evaluate(candidate).objective == 25.0
+    assert backend.evaluate(candidate).objective == 25.0
+    assert calls == 1
+
+
+def test_slurm_cli_run_uses_configured_backend(tmp_path, monkeypatch):
+    config_path = write_config(tmp_path, backend="slurm")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        request = json.loads(Path(command[-2]).read_text(encoding="utf-8"))
+        parameters = request["candidate"]["parameters"]
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "candidate_id": request["candidate"]["id"],
+                    "status": "success",
+                    "objective": sum(
+                        value**2 for value in parameters.values()
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setattr(
+        "hydroflow_opt.backends.slurm.shutil.which", lambda _: "/usr/bin/srun"
+    )
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert main(["run", str(config_path)]) == 0
+    assert len(commands) == 2
+    assert all(command[0] == "srun" for command in commands)
+
+
+def test_manifest_records_runtime_scratch(tmp_path):
+    pytest.importorskip("pygmo")
+    config_path = write_config(tmp_path, backend="slurm")
+    add_optimization(config_path, seed=17)
+    run_optimization(
+        load_config(config_path),
+        backend=InMemoryBackend(),
+    )
+    manifest_path = tmp_path / "run" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == 1
+    assert manifest["config"]["execution"] == {"backend": "slurm"}
+    assert manifest["config"]["scratch_directory"] == {
+        "template": "run-scratch",
+        "base_directory": str(tmp_path),
+    }
+    assert manifest["provenance"][0]["scratch_directory"] == str(
+        tmp_path / "run-scratch"
+    )
+    assert manifest["provenance"][0]["execution_backend"].endswith(
+        "InMemoryBackend"
+    )
+
+
+def test_resume_re_resolves_tmpdir_without_repeating_completed_work(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("pygmo")
+    config_path = write_config(
+        tmp_path,
+        scratch_directory="${TMPDIR}/hydroflow-opt",
+    )
+    add_optimization(config_path, generations=2, seed=123)
+    first_tmpdir = tmp_path / "allocation-1"
+    second_tmpdir = tmp_path / "allocation-2"
+    monkeypatch.setenv("TMPDIR", str(first_tmpdir))
+    original_save = runner._save_checkpoint
+
+    def save_then_interrupt(run_dir, checkpoint):
+        original_save(run_dir, checkpoint)
+        history = checkpoint["history"]
+        if history and history[-1]["generation"] == 1:
+            raise RuntimeError("simulated interruption")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "_save_checkpoint", save_then_interrupt)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            run_optimization(load_config(config_path))
+
+    completed_outcome = (
+        tmp_path
+        / "run"
+        / "evaluations"
+        / "island-000-initial-000"
+        / "outcome.json"
+    )
+    completed_mtime = completed_outcome.stat().st_mtime_ns
+    manifest_path = tmp_path / "run" / "manifest.json"
+    first_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_hash = first_manifest["config_hash"]
+
+    monkeypatch.setenv("TMPDIR", str(second_tmpdir))
+    summary = resume_optimization(tmp_path / "run")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert summary.total == 15
+    assert manifest["config_hash"] == original_hash
+    scratch_directories = [
+        entry["scratch_directory"] for entry in manifest["provenance"]
+    ]
+    assert scratch_directories == [
+        str(first_tmpdir / "hydroflow-opt"),
+        str(second_tmpdir / "hydroflow-opt"),
+    ]
+    assert completed_outcome.stat().st_mtime_ns == completed_mtime
+    resumed_request = json.loads(
+        (
+            tmp_path
+            / "run"
+            / "evaluations"
+            / "island-000-generation-000002-trial-000"
+            / "request.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert resumed_request["context"]["scratch_dir"].startswith(
+        str(second_tmpdir / "hydroflow-opt")
+    )
 
 
 def test_two_islands_restore_migration_database_between_generations(tmp_path):
@@ -369,3 +1107,202 @@ def test_optimization_accepts_backend_without_worker_result_files(tmp_path):
     evaluation = tmp_path / "run" / "evaluations" / "island-000-initial-000"
     assert (evaluation / "outcome.json").exists()
     assert not (evaluation / "result.json").exists()
+
+
+def stop_before_evolution(*args, **kwargs):
+    raise RuntimeError("initialization complete")
+
+
+def test_initialization_parallelism_and_serial_equivalence(
+    tmp_path, monkeypatch
+):
+    pg = pytest.importorskip("pygmo")
+    path = write_config(tmp_path, concurrent=2)
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    # Exercise resizing a pool that already exists with the wrong size.
+    pg.mp_island.init_pool(processes=1)
+    pg.mp_island.resize_pool(1)
+    monkeypatch.setattr(runner, "_build_archipelago", stop_before_evolution)
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        events = manager.list()
+        backend = RecordingInitializationBackend(events, manager.Barrier(2))
+        with pytest.raises(RuntimeError, match="initialization complete"):
+            run_optimization(config, backend=backend)
+        recorded = list(events)
+    assert pg.mp_island.get_pool_size() == 2
+    active = set()
+    peak = 0
+    starts = []
+    for action, candidate_id, island, pid in recorded:
+        assert pid != os.getpid()
+        if action == "start":
+            assert island not in active
+            active.add(island)
+            starts.append(candidate_id)
+            peak = max(peak, len(active))
+        else:
+            active.remove(island)
+    assert peak == 2
+    assert not active
+    checkpoint = runner._load_checkpoint(config.run_dir, required=True)
+    assert len(starts) == len(set(starts)) == 10
+    assert checkpoint["evaluation_ids"] == [
+        candidate_id
+        for island in range(2)
+        for candidate_id in runner._initial_ids(island, 5)
+    ]
+    for island in range(2):
+        assert [
+            name for name in starts if name.startswith(f"island-{island:03d}")
+        ] == runner._initial_ids(island, 5)
+        # Avoid overwriting concurrent results with the serial reference.
+        problem = pg.problem(
+            runner._OptimizationProblem(
+                replace(config, run_dir=tmp_path / "serial"),
+                "serial-reference",
+                island,
+                0,
+                "initial",
+                InMemoryBackend(),
+            )
+        )
+        population = pg.population(
+            problem, 5, seed=runner._derived_seed(42, "population", island, 0)
+        )
+        assert checkpoint["islands"][island] == runner._population_state(
+            population, island, 0
+        )
+
+
+def test_initialization_resume_reuses_uncheckpointed_outcomes(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("pygmo")
+    path = write_config(tmp_path, concurrent=2)
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    save = runner._save_checkpoint
+
+    def save_first_then_interrupt(run_dir, checkpoint):
+        save(run_dir, checkpoint)
+        if len(checkpoint["islands"]) == 1:
+            raise RuntimeError("checkpoint interrupted")
+
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        events = manager.list()
+        backend = RecordingInitializationBackend(events, manager.Barrier(2))
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                runner, "_save_checkpoint", save_first_then_interrupt
+            )
+            with pytest.raises(RuntimeError, match="checkpoint interrupted"):
+                run_optimization(config, backend=backend)
+        recorded = list(events)
+        # All tasks drained despite the interruption.
+        assert len(recorded) == 20
+        checkpoint = runner._load_checkpoint(config.run_dir, required=True)
+        assert len(checkpoint["islands"]) == 1
+        later_outcomes = list(
+            config.run_dir.glob(
+                "evaluations/island-001-initial-*/outcome.json"
+            )
+        )
+        assert len(later_outcomes) == 5
+        with monkeypatch.context() as patch:
+            patch.setattr(runner, "_build_archipelago", stop_before_evolution)
+            with pytest.raises(RuntimeError, match="initialization complete"):
+                resume_optimization(config.run_dir, backend=backend)
+        assert list(events) == recorded
+    resumed = runner._load_checkpoint(config.run_dir, required=True)
+    assert resumed["islands"][0] == checkpoint["islands"][0]
+    assert len(resumed["islands"]) == 2
+    assert len(resumed["evaluation_ids"]) == 10
+    for outcome_path in later_outcomes:
+        outcome = json.loads(outcome_path.read_text())
+        position = int(outcome["candidate_id"].rsplit("-", 1)[1])
+        assert resumed["islands"][1]["f"][position] == [outcome["objective"]]
+
+
+@pytest.mark.parametrize("failure", ["exception", "result"])
+def test_initialization_failures_drain_workers(tmp_path, monkeypatch, failure):
+    pytest.importorskip("pygmo")
+    path = write_config(tmp_path, concurrent=2)
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    monkeypatch.setattr(runner, "_build_archipelago", stop_before_evolution)
+    expected = (
+        "initialization worker failed"
+        if failure == "exception"
+        else "initialization complete"
+    )
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        events = manager.list()
+        backend = RecordingInitializationBackend(
+            events, manager.Barrier(2), failure
+        )
+        with pytest.raises(RuntimeError, match=expected):
+            run_optimization(config, backend=backend)
+        recorded = list(events)
+    assert (
+        len(
+            [
+                event
+                for event in recorded
+                if event[0] == "end" and event[2] == 1
+            ]
+        )
+        == 5
+    )
+    if failure == "result":
+        checkpoint = runner._load_checkpoint(config.run_dir, required=True)
+        assert all(
+            fitness == [runner._PENALTY]
+            for island in checkpoint["islands"]
+            for fitness in island["f"]
+        )
+
+
+def test_parallel_initialization_uses_slurm_backend(tmp_path, monkeypatch):
+    pg = pytest.importorskip("pygmo")
+    launcher = tmp_path / "srun"
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        "flags = []\n"
+        "while args[0].startswith('--'):\n"
+        "    flags.append(args.pop(0))\n"
+        "destination = pathlib.Path(args[-1]).parent / 'slurm-call.json'\n"
+        "destination.write_text(json.dumps({'flags': flags, "
+        "'job': os.environ['SLURM_JOB_ID']}))\n"
+        "sys.exit(subprocess.run(args, check=False).returncode)\n"
+    )
+    launcher.chmod(0o755)
+    # Spawn fresh workers so they inherit this allocation and launcher.
+    pg.mp_island.shutdown_pool()
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SLURM_JOB_ID", "initialization-test")
+    monkeypatch.setattr(runner, "_build_archipelago", stop_before_evolution)
+    path = write_config(tmp_path, concurrent=2, backend="slurm")
+    add_optimization(path, islands=2, seed=42)
+    config = load_config(path)
+    try:
+        with pytest.raises(RuntimeError, match="initialization complete"):
+            run_optimization(config)
+        calls = list(config.run_dir.glob("evaluations/*/slurm-call.json"))
+        assert len(calls) == 10
+        for call in calls:
+            assert json.loads(call.read_text()) == {
+                "job": "initialization-test",
+                "flags": [
+                    "--exclusive",
+                    "--nodes=1",
+                    "--ntasks=1",
+                    "--cpus-per-task=1",
+                    "--cpu-bind=cores",
+                    "--mem=1536M",
+                ],
+            }
+    finally:
+        pg.mp_island.shutdown_pool()
