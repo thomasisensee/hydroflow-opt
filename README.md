@@ -7,15 +7,13 @@
 [![PyPI](https://img.shields.io/pypi/v/hydroflow-opt?logo=pypi&logoColor=gold&label=PyPI)](https://pypi.org/project/hydroflow-opt)
 [![Python](https://img.shields.io/pypi/pyversions/hydroflow-opt?logo=python&logoColor=gold&label=Python)](https://pypi.org/project/hydroflow-opt)
 
-`hydroflow-opt` is a Linux/Python 3.11–3.13 orchestration package for simulation-based optimization. It uses pygmo's island model and runs individual case evaluations in isolated subprocesses.
+`hydroflow-opt` is a Linux/Python 3.11–3.13 orchestration package for simulation-based optimization. It uses [pygmo's](https://github.com/esa/pygmo2) island model, runs concurrent evaluations locally or within Slurm allocations, and supports checkpoints and resume.
 
-Cases are supplied by installed plugins. The package includes a deterministic `quadratic` case for laptop development and tests. A real case, such as `hydrofoil-opt`, depends on `hydroflow-opt` rather than the reverse.
-
-The [documentation](doc/index.md) explains the execution model, optimization, configuration, output files, and case-plugin contract.
+Simulation cases are supplied by installed plugins. The package includes a deterministic `quadratic` case for development and tests; simulation plugins may require additional runtime dependencies.
 
 ## Installation
 
-Install with uv or pip on a supported Linux system:
+From a source checkout, install with uv or pip:
 
 ```bash
 uv sync --extra tests
@@ -23,9 +21,9 @@ uv sync --extra tests
 python -m pip install --editable '.[tests]'
 ```
 
-`pygmo` is a required dependency. A simulation case may have additional runtime prerequisites, but those must not be imported by `hydroflow-opt` itself.
+## Quick start
 
-## Run explicit candidates
+Run the included example from the repository root with the installed environment active:
 
 ```bash
 hydroflow-opt check examples/quadratic.toml
@@ -33,147 +31,16 @@ hydroflow-opt run examples/quadratic.toml
 hydroflow-opt inspect examples/runs/quadratic
 ```
 
-```toml
-[run]
-directory = "runs/quadratic"
-scratch_directory = "runs/quadratic/scratch"
+For optimization, use `hydroflow-opt optimize CONFIG`. Continue an interrupted optimization with `hydroflow-opt resume RUN_DIRECTORY`.
 
-[case]
-name = "quadratic"
+## Documentation
 
-[resources]
-available_cpus = 1
-concurrent_evaluations = 1
-mpi_ranks = 1
-threads_per_rank = 1
+See the [full documentation](https://hydroflow-opt.readthedocs.io/) for setup and usage details:
 
-[[candidate]]
-id = "baseline"
-[candidate.parameters]
-x = 1.0
-y = 2.0
-```
-
-Each candidate gets its own request, result, scratch directory, and ordered stage records. Every stage has separate stdout, stderr, timing, command, and resource metadata. The resource invariant is:
-
-```text
-concurrent_evaluations × mpi_ranks × threads_per_rank ≤ available_cpus
-```
-
-`hydroflow-opt` refuses a configuration that violates it. It also rejects a stage whose CPU request exceeds one configured evaluation slot.
-
-## Execute candidates with Slurm
-
-To debug a candidate from a previous run, generate a standalone configuration:
-
-```bash
-hydroflow-opt replay-config runs/example/evaluations/candidate-id/request.json debug.toml
-hydroflow-opt check debug.toml
-hydroflow-opt run debug.toml
-```
-
-This preserves the saved candidate and case settings, reduces concurrency to one evaluation, and uses fresh paths based on the TOML filename. Review the generated execution/resources settings and activate the case environment before running; Slurm still requires an allocation. See [replay configuration](doc/configuration.md#debugging-a-saved-candidate).
-
-Local subprocess execution is the default. One-process stages run directly; multi-process stages use `mpiexec`. To launch stages as Slurm job steps, select the backend explicitly:
-
-```toml
-[execution]
-backend = "slurm"
-
-[resources]
-# Trial budget; validate against your workload.
-memory_mib_per_evaluation = 1536
-```
-
-The command must run inside an allocation created by `sbatch` or `salloc`. `hydroflow-opt` deliberately refuses to invoke `srun` without `SLURM_JOB_ID`, preventing candidates from becoming separately queued jobs. For example:
-
-```bash
-#!/bin/bash
-#SBATCH --nodes=1
-#SBATCH --ntasks=8
-#SBATCH --mem=8G
-#SBATCH --cpus-per-task=1
-#SBATCH --hint=nomultithread
-
-hydroflow-opt optimize hydrofoil.toml
-```
-
-with:
-
-```toml
-[run]
-directory = "/persistent/workspace/runs/hydrofoil"
-scratch_directory = "${TMPDIR}/hydrofoil-opt"
-
-[execution]
-backend = "slurm"
-
-[resources]
-available_cpus = 8
-concurrent_evaluations = 4
-memory_mib_per_evaluation = 1536
-mpi_ranks = 2
-threads_per_rank = 1
-```
-
-Every plugin supplies an ordered evaluation plan. Each stage is launched as an exclusive one-node step with its own process and thread shape. For example, a two-process, one-thread stage receives:
-
-```text
-srun --exclusive --nodes=1 --ntasks=2 --cpus-per-task=1 \
-  --cpu-bind=cores --mem=1536M --mpi=pmix
-```
-
-This lets Slurm place and account for preprocessing, solver, and postprocessing stages independently while seeing the actual MPI rank topology. The allocation may span nodes, but one stage must fit on one node. In a single-node allocation, `${TMPDIR}` can place simulation cases on fast node-local storage. In shared mode, hydroflow-opt rejects `${TMPDIR}` scratch in a multi-node allocation because successive stages may run on different nodes. With the default shared scratch mode, multi-node allocations require a scratch directory visible from every allocated node. Set `run.scratch_mode = "node_local"` to pin each candidate to one node and use `$TMPDIR` across a multi-node allocation; see [node-local scratch](doc/node-local-scratch.md). Partition, allocation time limit, node count, and total allocation size remain properties of the outer Slurm job.
-
-Set optional `execution.stage_timeout_seconds` to bound each stage independently and let optimization continue after an over-budget evaluation fails. Slurm enforces the limit on each job step; local execution terminates the stage's process group. Omit the setting to keep execution unlimited by hydroflow-opt. See [stage time limits](doc/configuration.md#stage-time-limits) for timing and cleanup details.
-
-## Optimize with islands
-
-Add an `[optimization]` table and use `optimize`:
-
-```toml
-[optimization]
-islands = 4
-population_size = 8
-generations = 10
-differential_weight = 0.8
-crossover_rate = 0.9
-topology = "fully_connected"
-seed = 12345 # optional; generated and recorded when omitted
-migrant_handling = "preserve" # or "evict"
-```
-
-```bash
-hydroflow-opt optimize path/to/config.toml
-```
-
-By default, pygmo generates and evaluates initial populations concurrently across islands, using the same process pool as evolution. Candidates within each island are evaluated sequentially. The pool is explicitly sized to the smaller of `optimization.islands` and `resources.concurrent_evaluations`; the current configuration requires at least as many evaluation slots as islands. In Slurm mode, these Python workers coordinate on the launching node while the backend places simulation stages within the allocation using `srun`.
-
-Completed initial populations are checkpointed in island order. Later islands may finish before they are checkpointed; their saved candidate outcomes are reused on resume. Initialization errors wait for already-started workers to finish before returning.
-
-To reuse a database of pre-evaluated individuals, provide a JSON object whose values are `[parameter_vector, objective]` records:
-
-```toml
-[optimization]
-initial_population_file = "start_db.json"
-```
-
-Each island samples `population_size` records without replacement using its derived reproducible seed. Islands sample independently. Seed records are stored in the optimization checkpoint but are not counted as new evaluations. `migrant_handling` selects whether pygmo preserves or evicts migrants after delivery.
-
-Optimization runs write an atomic JSON checkpoint after initialization and after every generation. Resume an interrupted run using its stored effective configuration:
-
-```bash
-hydroflow-opt resume path/to/run-directory
-```
-
-Software and platform versions are recorded in `manifest.json`. Compatible version changes produce warnings when resuming rather than blocking the run; hydroflow-opt treats deterministic replay as best-effort. The selected execution backend is also recorded and restored automatically by `resume`.
-
-The initial implementation supports pygmo differential evolution and a fully-connected archipelago. Islands use pygmo multiprocessing and therefore cannot exceed `resources.concurrent_evaluations`; this preserves the CPU budget even when each evaluation launches MPI ranks. The case plugin supplies parameter names, bounds, and decoding; optimization settings are per run.
-
-## Write a case plugin
-
-Publish an entry point in the `hydroflow_opt.cases` group. Its plugin object exposes `parameter_space(options)` and `evaluation_plan(candidate, paths, resources)`. The latter returns an ordered `EvaluationPlan` of `EvaluationStage` objects. Each stage declares a command, working directory, and portable `StageResources(processes, threads_per_process)` shape.
-
-The local or Slurm backend adds the appropriate launcher. Plugins must never construct `mpiexec` or `srun` commands. The final stage writes the structured JSON result to `paths.result_path`; `hydroflow-opt` validates it and adds the recorded stage timings. A nonzero stage exit stops the plan and becomes a structured failed evaluation.
-
-Slurm runs require `resources.memory_mib_per_evaluation`, the total per-stage reservation in MiB. See [memory configuration and resume overrides](doc/configuration.md#slurm-memory-budget).
+- [Overview](doc/overview.md): responsibilities and run modes.
+- [Configuration and commands](doc/configuration.md): TOML settings, resource budgets, and debugging saved candidates.
+- [Execution model](doc/execution-model.md): staged evaluations and local/Slurm execution.
+- [Optimization](doc/optimization.md): islands, concurrent initial populations, checkpoints, and resume.
+- [Node-local scratch](doc/node-local-scratch.md): placement and scratch storage across Slurm nodes.
+- [Output layout](doc/output-layout.md): results, logs, and run metadata.
+- [Writing plugins](doc/writing-plugins.md): the case plugin contract.
