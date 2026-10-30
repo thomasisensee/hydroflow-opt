@@ -13,7 +13,7 @@ maintainers = [
     { name = "Thomas Isensee", email = "thomas.isensee@iwr.uni-heidelberg.de" },
 ]
 version = "0.2.0"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 license-files = [
     "LICENSE.md",
     "COPYING.md",
@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "numpy",
